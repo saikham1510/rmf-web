@@ -17,8 +17,12 @@ enum AlertCategory {
 export const AlertStore = React.memo(() => {
   const rmf = React.useContext(RmfAppContext);
   const [taskAlerts, setTaskAlerts] = React.useState<Record<string, Alert>>({});
+  const enableTaskAlertDialog = false;
 
   const categorizeAndPushAlerts = (alert: Alert) => {
+    if (!enableTaskAlertDialog) {
+      return;
+    }
     // We check if an existing alert has been acknowledged, remove it before
     // adding the acknowledged alert.
     if (alert.category === AlertCategory.Task) {
