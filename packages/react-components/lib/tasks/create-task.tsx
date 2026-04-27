@@ -718,9 +718,8 @@ export function CreateTaskForm({
   const [callToUpdateFavoriteTask, setCallToUpdateFavoriteTask] = React.useState(false);
   const [deletingFavoriteTask, setDeletingFavoriteTask] = React.useState(false);
 
-  const [favoriteTaskBuffer, setFavoriteTaskBuffer] = React.useState<TaskFavorite>(
-    defaultFavoriteTask(),
-  );
+  const [favoriteTaskBuffer, setFavoriteTaskBuffer] =
+    React.useState<TaskFavorite>(defaultFavoriteTask());
   const [favoriteTaskTitleError, setFavoriteTaskTitleError] = React.useState(false);
   const [savingFavoriteTask, setSavingFavoriteTask] = React.useState(false);
 
@@ -765,6 +764,7 @@ export function CreateTaskForm({
   };
   // schedule is not supported with batch upload
   const scheduleEnabled = taskRequests.length === 1;
+  const startTimeEnabled = taskRequest.category === 'clean';
 
   const updateTasks = () => {
     setTaskRequests((prev) => {
@@ -826,8 +826,17 @@ export function CreateTaskForm({
     }
     taskRequest.description = newDesc;
     taskRequest.category = newCategory;
+    if (newCategory !== 'clean') {
+      taskRequest.unix_millis_earliest_start_time = 0;
+    }
 
-    setFavoriteTaskBuffer({ ...favoriteTaskBuffer, category: newCategory, description: newDesc });
+    setFavoriteTaskBuffer({
+      ...favoriteTaskBuffer,
+      category: newCategory,
+      description: newDesc,
+      unix_millis_earliest_start_time:
+        newCategory === 'clean' ? favoriteTaskBuffer.unix_millis_earliest_start_time : 0,
+    });
 
     updateTasks();
   };
@@ -844,6 +853,9 @@ export function CreateTaskForm({
     for (const t of taskRequests) {
       t.requester = requester;
       t.unix_millis_request_time = Date.now();
+      if (t.category !== 'clean') {
+        t.unix_millis_earliest_start_time = 0;
+      }
     }
 
     const submittingSchedule = scheduling && scheduleEnabled;
@@ -1040,30 +1052,32 @@ export function CreateTaskForm({
                       </MenuItem>
                     </TextField>
                   </Grid>
-                  <Grid item xs={10}>
-                    <DateTimePicker
-                      inputFormat={'MM/dd/yyyy HH:mm'}
-                      value={
-                        taskRequest.unix_millis_earliest_start_time
-                          ? new Date(taskRequest.unix_millis_earliest_start_time)
-                          : new Date()
-                      }
-                      onChange={(date) => {
-                        if (!date) {
-                          return;
+                  {startTimeEnabled && (
+                    <Grid item xs={10}>
+                      <DateTimePicker
+                        inputFormat={'MM/dd/yyyy HH:mm'}
+                        value={
+                          taskRequest.unix_millis_earliest_start_time
+                            ? new Date(taskRequest.unix_millis_earliest_start_time)
+                            : new Date()
                         }
-                        taskRequest.unix_millis_earliest_start_time = date.valueOf();
-                        setFavoriteTaskBuffer({
-                          ...favoriteTaskBuffer,
-                          unix_millis_earliest_start_time: date.valueOf(),
-                        });
-                        updateTasks();
-                      }}
-                      label="Start Time"
-                      renderInput={(props) => <TextField {...props} />}
-                    />
-                  </Grid>
-                  <Grid item xs={2}>
+                        onChange={(date) => {
+                          if (!date) {
+                            return;
+                          }
+                          taskRequest.unix_millis_earliest_start_time = date.valueOf();
+                          setFavoriteTaskBuffer({
+                            ...favoriteTaskBuffer,
+                            unix_millis_earliest_start_time: date.valueOf(),
+                          });
+                          updateTasks();
+                        }}
+                        label="Start Time"
+                        renderInput={(props) => <TextField {...props} />}
+                      />
+                    </Grid>
+                  )}
+                  <Grid item xs={startTimeEnabled ? 2 : 12}>
                     <PositiveIntField
                       id="priority"
                       label="Priority"
@@ -1131,7 +1145,7 @@ export function CreateTaskForm({
               variant="outlined"
               disabled={submitting}
               className={classes.actionBtn}
-              onClick={(ev) => onClose && onClose(ev, 'escapeKeyDown')}
+              onClick={() => onClose && onClose({} as never, 'escapeKeyDown')}
             >
               Cancel
             </Button>
@@ -1197,7 +1211,7 @@ export function CreateTaskForm({
           title="Schedule Task"
           submitting={false}
           onClose={() => setOpenSchedulingDialog(false)}
-          onSubmit={(ev) => {
+          onSubmit={(ev: React.FormEvent) => {
             handleSubmitSchedule(ev);
             setOpenSchedulingDialog(false);
           }}

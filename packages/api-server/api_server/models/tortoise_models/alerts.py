@@ -15,6 +15,7 @@ class Alert(Model):
         Task = "task"
         Fleet = "fleet"
         Robot = "robot"
+        Cleaning = "cleaning"
 
     id = CharField(255, pk=True)
     original_id = CharField(255, index=True)

@@ -262,7 +262,10 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
       try {
         const { data: alerts } = await rmf.alertsApi.getAlertsAlertsGet();
         const robotAlerts = (alerts as Alert[])
-          .filter((a) => a.category === 'robot' && !!a.id)
+          .filter((a) => {
+            const category = String(a.category ?? '').toLowerCase();
+            return (category.includes('robot') || category.includes('clean')) && !!a.id;
+          })
           .sort((a, b) => a.unix_millis_created_time - b.unix_millis_created_time);
 
         for (const alert of robotAlerts) {
@@ -290,12 +293,11 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
             if (pickupLower.includes('initial_point') || pickupLower.includes('initial point')) {
               continue;
             }
-            if (!itemName || itemName === 'item' || itemName === 'the item') {
-              continue;
-            }
-            if (pickupPlace) {
+            if (itemName && itemName !== 'item' && itemName !== 'the item') {
               pickupItemRef.current.set(pickupPlace, itemName);
               friendlyMsg = `Robot is going to ${pickupPlace} to pick up ${itemName}`;
+            } else {
+              friendlyMsg = `Robot is going to ${pickupPlace} to pick up item`;
             }
             shouldNotify = true;
           } else if (msg.startsWith('initial_point')) {
@@ -303,7 +305,30 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
           } else if (msg.startsWith('dropoff_reached')) {
             continue;
           } else if (msg.startsWith('delivery_completed')) {
-            friendlyMsg = 'Delivery task is completed';
+            const m = msg.match(/Delivery task by (\S+) is complete(?: from (.+?) to (.+?))?\.?$/);
+            const robot = m?.[1];
+            friendlyMsg = robot
+              ? `${robot} delivery task is completed`
+              : 'Delivery task is completed';
+            shouldNotify = true;
+          } else if (msg.startsWith('patrol_start')) {
+            const m = msg.match(/(\S+) is going to (.+?)\.?$/);
+            const robot = m?.[1];
+            const place = m?.[2];
+            if (robot && place) {
+              friendlyMsg = `${robot} is going to ${place} for patrol`;
+              shouldNotify = true;
+            }
+          } else if (msg.startsWith('patrol_reached')) {
+            const m = msg.match(/(\S+) reached (.+?)\.?$/);
+            const robot = m?.[1];
+            const place = m?.[2];
+            if (robot && place) {
+              friendlyMsg = `${robot} reached ${place} for patrol`;
+              shouldNotify = true;
+            }
+          } else if (msg.startsWith('patrol_completed')) {
+            friendlyMsg = 'Patrol task is completed';
             shouldNotify = true;
           } else if (msg.startsWith('pickup_done')) {
             const pickupMatch = msg.match(/picked up (.+?) at (.+?) and is heading to (.+?)\.?$/);
@@ -351,14 +376,64 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
               : `Robot drop-off finished after dropping off ${itemText}`;
             shouldNotify = true;
           } else if (msg.startsWith('task_returning')) {
-            const returningMatch = msg.match(/returning to (.+?)\.?$/);
-            const initialPlace = returningMatch?.[1]?.trim();
-            friendlyMsg = initialPlace
-              ? `Robot is returning to ${initialPlace}`
-              : 'Robot is returning to the initial point';
+            const m = msg.match(/(\S+) is returning to (.+?)\.?$/);
+            const robot = m?.[1];
+            const place = m?.[2];
+            if (robot && place) {
+              friendlyMsg = `${robot} is returning to ${place}`;
+            } else {
+              friendlyMsg = 'Robot is returning to initial point';
+            }
             shouldNotify = true;
           } else if (msg.startsWith('returned_to_initial')) {
-            continue;
+            const m = msg.match(/(\S+) returned to (.+?)\.?$/);
+            const robot = m?.[1];
+            const place = m?.[2];
+            if (robot && place) {
+              friendlyMsg = `${robot} reached charger point at ${place}`;
+            } else {
+              friendlyMsg = 'Robot reached charger point';
+            }
+            shouldNotify = true;
+          } else if (msg.startsWith('cleaning_start')) {
+            const m = msg.match(/(\S+) is going to (.+?)(?: for cleaning| to clean)?\.?$/);
+            const robot = m?.[1];
+            const zone = m?.[2];
+
+            if (robot && zone) {
+              friendlyMsg = `${robot} is going to ${zone} for cleaning`;
+              shouldNotify = true;
+            }
+          } else if (msg.startsWith('cleaning_reached')) {
+            const m = msg.match(/(\S+) reached (.+?) for cleaning\.?$/);
+            const robot = m?.[1];
+            const zone = m?.[2];
+
+            if (robot && zone) {
+              friendlyMsg = `${robot} started cleaning at ${zone}`;
+              shouldNotify = true;
+            }
+          } else if (msg.startsWith('cleaning_done')) {
+            const m = msg.match(/(\S+) finished cleaning (.+?)\.?$/);
+            const robot = m?.[1];
+            const zone = m?.[2];
+
+            if (robot && zone) {
+              friendlyMsg = `${robot} finished cleaning ${zone}`;
+              shouldNotify = true;
+            }
+          } else if (msg.startsWith('cleaning_completed')) {
+            const m = msg.match(/(\S+) cleaning task is completed\.?$/);
+            const robot = m?.[1];
+
+            friendlyMsg = robot ? `${robot} cleaning task is completed` : 'Cleaning task completed';
+
+            shouldNotify = true;
+          } else if (msg.startsWith('cleaning_charger_reached')) {
+            const m = msg.match(/(\S+) reached charger point\.?$/);
+            const robot = m?.[1];
+            friendlyMsg = robot ? `${robot} reached charger point` : 'Reached charger point';
+            shouldNotify = true;
           }
 
           if (!shouldNotify) {
@@ -423,7 +498,7 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
 
     const timer = window.setTimeout(() => {
       setCurrentToast(null);
-    }, 5000);
+    }, 10000);
 
     return () => window.clearTimeout(timer);
   }, [currentToast]);
@@ -585,12 +660,12 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
             transform: 'translateX(-50%)',
             backgroundColor: '#059669',
             color: 'white',
-            padding: '16px 24px',
-            borderRadius: '12px',
+            padding: '18px 28px',
+            borderRadius: '14px',
             boxShadow: '0 10px 25px rgba(0,0,0,0.3)',
             zIndex: 10000,
-            maxWidth: '500px',
-            fontSize: '16px',
+            maxWidth: '560px',
+            fontSize: '17px',
             fontWeight: '500',
             animation: 'slideDown 0.3s ease-out',
             textAlign: 'center',

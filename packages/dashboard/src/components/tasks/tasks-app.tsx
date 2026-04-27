@@ -158,17 +158,25 @@ export const TasksApp = React.memo(
         }
 
         const subs: Subscription[] = [];
+        const statusFilter =
+          filterColumn === 'status' && filterValue
+            ? String(filterValue)
+            : 'queued,underway,failed,completed';
+        const startTimeFilter = filterColumn === 'unix_millis_start_time' ? filterValue : undefined;
+        const finishTimeFilter =
+          filterColumn === 'unix_millis_finish_time' ? filterValue : undefined;
+
         (async () => {
           const resp = await rmf.tasksApi.queryTaskStatesTasksGet(
-            filterColumn && filterColumn === 'id_' ? filterValue : undefined,
-            filterColumn && filterColumn === 'category' ? filterValue : undefined,
-            filterColumn && filterColumn === 'assigned_to' ? filterValue : undefined,
-            filterColumn && filterColumn === 'status' ? filterValue : undefined,
-            undefined,
-            filterColumn && filterColumn === 'unix_millis_start_time' ? filterValue : undefined,
-            filterColumn && filterColumn === 'unix_millis_finish_time' ? filterValue : undefined,
+            filterColumn === 'id_' ? filterValue : undefined,
+            filterColumn === 'category' ? filterValue : undefined,
+            filterColumn === 'assigned_to' ? filterValue : undefined,
+            statusFilter,
+            undefined, // keep this placeholder parameter
+            startTimeFilter,
+            finishTimeFilter,
             GET_LIMIT,
-            (tasksState.page - 1) * GET_LIMIT, // Datagrid component need to start in page 1. Otherwise works wrong
+            (tasksState.page - 1) * GET_LIMIT,
             orderBy,
             undefined,
           );
@@ -254,7 +262,7 @@ export const TasksApp = React.memo(
       return (
         <Window
           ref={ref}
-          title="Tasks"
+          title="Robot Tasks"
           onClose={onClose}
           toolbar={
             <Toolbar variant="dense">
