@@ -111,6 +111,20 @@ const TaskRequester = (requester: string | null): JSX.Element => {
   );
 };
 
+function isValidTimestamp(value: number | null | undefined): boolean {
+  return !!value && value >= 1000000000000;
+}
+
+function formatDateTime(millis: number, dateOnly = false): string {
+  const d = new Date(millis);
+
+  if (Number.isNaN(d.getTime())) return 'unknown';
+
+  if (dateOnly) return d.toLocaleDateString();
+
+  return `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+}
+
 export function TaskDataGridTable({
   tasks,
   onTaskClick,
@@ -144,16 +158,14 @@ export function TaskDataGridTable({
       width: 150,
       editable: false,
       renderCell: (cellValues) => {
+        const requestTime = cellValues.row.booking.unix_millis_request_time;
+
+        const displayTime = isValidTimestamp(requestTime) ? requestTime : Date.now();
+
         return (
           <TextField
             variant="standard"
-            value={
-              cellValues.row.booking.unix_millis_request_time
-                ? `${new Date(
-                    cellValues.row.booking.unix_millis_request_time,
-                  ).toLocaleDateString()}`
-                : 'unknown'
-            }
+            value={formatDateTime(displayTime, true)}
             InputProps={{ disableUnderline: true }}
             multiline
           />
@@ -207,56 +219,39 @@ export function TaskDataGridTable({
     {
       field: 'unix_millis_start_time',
       headerName: 'Start Time',
-      width: 150,
-      editable: false,
       renderCell: (cellValues) => {
+        const start = cellValues.row.unix_millis_start_time;
+        const request = cellValues.row.booking.unix_millis_request_time;
+
+        const displayTime = isValidTimestamp(start) ? start : request;
+
         return (
           <TextField
             variant="standard"
-            value={
-              cellValues.row.unix_millis_start_time
-                ? `${new Date(
-                    cellValues.row.unix_millis_start_time,
-                  ).toLocaleDateString()} ${new Date(
-                    cellValues.row.unix_millis_start_time,
-                  ).toLocaleTimeString()}`
-                : 'unknown'
-            }
+            value={formatDateTime(displayTime)}
             InputProps={{ disableUnderline: true }}
             multiline
           />
         );
       },
-      flex: 1,
-      filterOperators: getMinimalDateOperators,
-      filterable: true,
     },
     {
       field: 'unix_millis_finish_time',
       headerName: 'End Time',
-      width: 150,
-      editable: false,
       renderCell: (cellValues) => {
+        const finish = cellValues.row.unix_millis_finish_time;
+
+        const displayTime = isValidTimestamp(finish) ? finish : null;
+
         return (
           <TextField
             variant="standard"
-            value={
-              cellValues.row.unix_millis_finish_time
-                ? `${new Date(
-                    cellValues.row.unix_millis_finish_time,
-                  ).toLocaleDateString()} ${new Date(
-                    cellValues.row.unix_millis_finish_time,
-                  ).toLocaleTimeString()}`
-                : 'unknown'
-            }
+            value={displayTime ? formatDateTime(displayTime) : '-'}
             InputProps={{ disableUnderline: true }}
             multiline
           />
         );
       },
-      flex: 1,
-      filterOperators: getMinimalDateOperators,
-      filterable: true,
     },
     {
       field: 'status',

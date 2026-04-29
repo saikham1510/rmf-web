@@ -31,6 +31,27 @@ import { downloadCsvFull, downloadCsvMinimal } from './utils';
 
 const RefreshTaskQueueTableInterval = 5000;
 
+function isInternalFleetAdapterTask(task: TaskState): boolean {
+  const requester = task.booking.requester?.toLowerCase() || '';
+  const category = String(task.category || '').toLowerCase();
+
+  // requester patterns
+  if (
+    requester.includes('fleetadapter') ||
+    requester.includes('fleet_adapter') ||
+    requester.includes('fleet_adapt')
+  ) {
+    return true;
+  }
+
+  // internal execution categories
+  if (category === 'loop') {
+    return true;
+  }
+
+  return false;
+}
+
 enum TaskTablePanel {
   QueueTable = 0,
   Schedule = 1,
@@ -180,8 +201,26 @@ export const TasksApp = React.memo(
             orderBy,
             undefined,
           );
-          const results = resp.data as TaskState[];
-          const newTasks = results.slice(0, GET_LIMIT);
+          const results = (resp.data as TaskState[]).map((task) => {
+            const request = task.booking.unix_millis_request_time;
+
+            const start = task.unix_millis_start_time;
+            const finish = task.unix_millis_finish_time;
+
+            const fixedStart =
+              request != null && start && start < 1000000000000 ? request + start : start;
+
+            const fixedFinish =
+              request != null && finish && finish < 1000000000000 ? request + finish : finish;
+
+            return {
+              ...task,
+              unix_millis_start_time: fixedStart,
+              unix_millis_finish_time: fixedFinish,
+            };
+          });
+          const visibleResults = results.filter((task) => !isInternalFleetAdapterTask(task));
+          const newTasks = visibleResults.slice(0, GET_LIMIT);
 
           setTasksState((old) => ({
             ...old,
@@ -195,11 +234,27 @@ export const TasksApp = React.memo(
 
           subs.push(
             ...newTasks.map((task) =>
-              rmf
-                .getTaskStateObs(task.booking.id)
-                .subscribe((task) =>
-                  setTasksState((prev) => ({ ...prev, [task.booking.id]: task })),
-                ),
+              rmf.getTaskStateObs(task.booking.id).subscribe((updatedTask) => {
+                const request = updatedTask.booking.unix_millis_request_time;
+
+                const start = updatedTask.unix_millis_start_time;
+                const finish = updatedTask.unix_millis_finish_time;
+
+                const normalizedTask = {
+                  ...updatedTask,
+                  unix_millis_start_time:
+                    request != null && start && start < 1000000000000 ? request + start : start,
+                  unix_millis_finish_time:
+                    request != null && finish && finish < 1000000000000 ? request + finish : finish,
+                };
+
+                setTasksState((prev) => ({
+                  ...prev,
+                  data: prev.data.map((row) =>
+                    row.booking.id === normalizedTask.booking.id ? normalizedTask : row,
+                  ),
+                }));
+              }),
             ),
           );
         })();
@@ -225,7 +280,7 @@ export const TasksApp = React.memo(
           undefined,
         );
         const allTasks = resp.data as TaskState[];
-        return allTasks;
+        return allTasks.filter((task) => !isInternalFleetAdapterTask(task));
       };
 
       const exportTasksToCsv = async (minimal: boolean) => {

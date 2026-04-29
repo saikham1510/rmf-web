@@ -8,6 +8,7 @@ from api_server.logger import logger
 from api_server.models import User
 from api_server.models import tortoise_models as ttm
 from api_server.repositories.tasks import TaskRepository, task_repo_dep
+from api_server.utils.time_utils import now_wall_millis, wall_millis_to_datetime
 
 
 class AlertRepository:
@@ -40,7 +41,7 @@ class AlertRepository:
             {
                 "original_id": alert_id,
                 "category": category,
-                "unix_millis_created_time": round(datetime.now().timestamp() * 1e3),
+                "unix_millis_created_time": now_wall_millis(),
                 "acknowledged_by": None,
                 "unix_millis_acknowledged_time": None,
             },
@@ -64,9 +65,7 @@ class AlertRepository:
             )
             return acknowledged_alert_pydantic
 
-        ack_time = datetime.now()
-        epoch = datetime.utcfromtimestamp(0)
-        ack_unix_millis = round((ack_time - epoch).total_seconds() * 1000)
+        ack_unix_millis = now_wall_millis()
         new_id = f"{alert_id}__{ack_unix_millis}"
 
         ack_alert = alert.clone(pk=new_id)
@@ -75,7 +74,7 @@ class AlertRepository:
         # https://github.com/tortoise/tortoise-orm/pull/1131. This is a
         # temporary workaround.
         ack_alert._custom_generated_pk = True  # pylint: disable=W0212
-        unix_millis_acknowledged_time = round(ack_time.timestamp() * 1e3)
+        unix_millis_acknowledged_time = ack_unix_millis
         ack_alert.update_from_dict(
             {
                 "acknowledged_by": self.user.username,

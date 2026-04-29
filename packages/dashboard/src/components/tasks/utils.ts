@@ -101,11 +101,13 @@ export const toApiSchedule = (
 ): PostScheduledTaskRequest => {
   const start = schedule.startOn;
   const apiSchedules: PostScheduledTaskRequest['schedules'] = [];
-  const date = new Date(start);
-  const start_from = start.toISOString();
+  const utcDate = new Date(start);
+
+  const start_from = utcDate.toISOString();
+  const hours = utcDate.getUTCHours().toString().padStart(2, '0');
+  const minutes = utcDate.getUTCMinutes().toString().padStart(2, '0');
   const until = schedule.until?.toISOString();
-  const hours = date.getHours().toString().padStart(2, '0');
-  const minutes = date.getMinutes().toString().padStart(2, '0');
+
   const at = `${hours}:${minutes}`;
   schedule.days[0] && apiSchedules.push({ period: 'monday', start_from, at, until });
   schedule.days[1] && apiSchedules.push({ period: 'tuesday', start_from, at, until });

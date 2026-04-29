@@ -28,6 +28,7 @@ from api_server.models.rmf_api.task_state import Category, Id, Phase
 from api_server.models.tortoise_models import TaskRequest as DbTaskRequest
 from api_server.models.tortoise_models import TaskState as DbTaskState
 from api_server.rmf_io import task_events
+from api_server.utils.time_utils import now_wall_millis
 
 
 class TaskRepository:
@@ -59,6 +60,36 @@ class TaskRepository:
             )
 
     async def save_task_state(self, task_state: TaskState) -> None:
+        now_millis = now_wall_millis()
+
+        existing_task_state = await DbTaskState.get_or_none(id_=task_state.booking.id)
+
+        start_time = task_state.unix_millis_start_time
+        if not start_time or start_time <= 0:
+            start_time = (
+                existing_task_state.unix_millis_start_time
+                if existing_task_state and existing_task_state.unix_millis_start_time
+                else now_millis
+            )
+
+        request_time = task_state.booking.unix_millis_request_time
+        if not request_time or request_time <= 0:
+            request_time = (
+                existing_task_state.unix_millis_request_time
+                if existing_task_state and existing_task_state.unix_millis_request_time
+                else now_millis
+            )
+
+        # get previous DB value (ONLY source of truth)
+        finish_time = (
+            existing_task_state.unix_millis_finish_time if existing_task_state else None
+        )
+
+        # ONLY set ON FIRST completion event
+        if task_state.status and task_state.status.value == "completed":
+            if not finish_time:
+                finish_time = now_millis
+
         async with in_transaction():
             db_task_state, created = await DbTaskState.update_or_create(
                 {
@@ -69,19 +100,10 @@ class TaskRepository:
                     "assigned_to": task_state.assigned_to.name
                     if task_state.assigned_to
                     else None,
-                    "unix_millis_start_time": task_state.unix_millis_start_time
-                    and datetime.fromtimestamp(
-                        task_state.unix_millis_start_time / 1000
-                    ),
-                    "unix_millis_finish_time": task_state.unix_millis_finish_time
-                    and datetime.fromtimestamp(
-                        task_state.unix_millis_finish_time / 1000
-                    ),
+                    "unix_millis_start_time": start_time,
+                    "unix_millis_finish_time": finish_time,
                     "status": task_state.status if task_state.status else None,
-                    "unix_millis_request_time": task_state.booking.unix_millis_request_time
-                    and datetime.fromtimestamp(
-                        task_state.booking.unix_millis_request_time / 1000
-                    ),
+                    "unix_millis_request_time": request_time,
                     "requester": task_state.booking.requester
                     if task_state.booking.requester
                     else None,
@@ -115,11 +137,19 @@ class TaskRepository:
         if assigned_to is not None:
             filters["assigned_to__in"] = assigned_to
         if start_time_between is not None:
-            filters["unix_millis_start_time__gte"] = start_time_between[0]
-            filters["unix_millis_start_time__lte"] = start_time_between[1]
+            filters["unix_millis_start_time__gte"] = int(
+                start_time_between[0].timestamp() * 1000
+            )
+            filters["unix_millis_start_time__lte"] = int(
+                start_time_between[1].timestamp() * 1000
+            )
         if finish_time_between is not None:
-            filters["unix_millis_finish_time__gte"] = finish_time_between[0]
-            filters["unix_millis_finish_time__lte"] = finish_time_between[1]
+            filters["unix_millis_finish_time__gte"] = int(
+                finish_time_between[0].timestamp() * 1000
+            )
+            filters["unix_millis_finish_time__lte"] = int(
+                finish_time_between[1].timestamp() * 1000
+            )
         if status is not None:
             valid_values = [member.value for member in TaskStatus]
             filters["status__in"] = []
@@ -314,8 +344,8 @@ class TaskRepository:
                     id=Id(root=next_phase_key),
                     category=Category(root="Task completed"),
                     detail=None,
-                    unix_millis_start_time=None,
-                    unix_millis_finish_time=None,
+                    unix_millis_start_time=task_state.unix_millis_start_time or 0,
+                    unix_millis_finish_time=task_state.unix_millis_finish_time or 0,
                     original_estimate_millis=None,
                     estimate_millis=None,
                     final_event_id=None,

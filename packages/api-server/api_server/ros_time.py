@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 
 from builtin_interfaces.msg import Time as RosTime
 
+from api_server.utils.time_utils import now_wall_millis, wall_millis_to_datetime
+
 
 def ros_to_py_datetime(ros_time: RosTime) -> datetime:
     """
@@ -40,7 +42,7 @@ def convert_to_rmf_time(timestamp: int, now: RosTime) -> RosTime:
         sec=timestamp,
         nanosec=0,
     )
-    utc_now = py_to_ros_time(datetime.now())
+    utc_now = py_to_ros_time(wall_millis_to_datetime(now_wall_millis()))
     sec = ros_time.sec - utc_now.sec + now.sec
     nanosec = ros_time.nanosec - utc_now.nanosec + now.nanosec
     if nanosec < 0:

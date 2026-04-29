@@ -4,6 +4,7 @@ from typing import Tuple
 from fastapi import Depends, Query
 
 from api_server import clock
+from api_server.utils.time_utils import now_wall_millis
 
 from .fast_io import SubscriptionRequest
 from .models import Pagination, User
@@ -45,7 +46,7 @@ def between_query(
             "-60000" - Fetches logs in the last minute.
         """,
     ),
-    now: int = Depends(clock.now),
+    now: int = Depends(now_wall_millis),
 ) -> Tuple[int, int]:
     if between.startswith("-"):
         period = (now - int(between[1:]), now)
@@ -67,7 +68,7 @@ def start_time_between_query(
             "1000,2000" - Fetches logs between unix millis 1000 and 2000.
         """,
     ),
-    now: int = Depends(clock.now),
+    now: int = Depends(now_wall_millis),
 ) -> Tuple[datetime, datetime] | None:
     if start_time_between is None:
         return None
@@ -99,7 +100,7 @@ def finish_time_between_query(
             "-60000" - Fetches logs in the last minute.
         """,
     ),
-    now: int = Depends(clock.now),
+    now: int = Depends(now_wall_millis),
 ) -> Tuple[datetime, datetime] | None:
     if finish_time_between is None:
         return None

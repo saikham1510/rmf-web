@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import schedule
@@ -22,6 +22,7 @@ from api_server.models import (
 )
 from api_server.models import tortoise_models as ttm
 from api_server.repositories import TaskRepository, task_repo_dep
+from api_server.utils.time_utils import now_wall_millis, wall_millis_to_datetime
 
 from .tasks import post_dispatch_task
 
@@ -55,13 +56,13 @@ async def schedule_task(task: ttm.ScheduledTask, task_repo: TaskRepository):
 
     async def run():
         await post_dispatch_task(req, task_repo)
-        task.last_ran = datetime.now()
+        task.last_ran = wall_millis_to_datetime(now_wall_millis())
         await task.save()
 
     def do():
         logger.info(f"starting task {task.pk}")
-        datetime_to_iso = datetime.now().isoformat()
-        if datetime_to_iso[:10] in task.except_dates:
+        datetime_to_iso = wall_millis_to_datetime(now_wall_millis()).isoformat()
+        if task.except_dates and datetime_to_iso[:10] in task.except_dates:
             return
         asyncio.get_event_loop().create_task(run())
 
@@ -100,7 +101,12 @@ async def post_scheduled_task(
             )
             schedules = [
                 ttm.ScheduledTaskSchedule(
-                    scheduled_task=scheduled_task, **x.model_dump()
+                    scheduled_task=scheduled_task,
+                    start_from=x.start_from,
+                    until=x.until,
+                    at=x.at,
+                    every=x.every,
+                    period=x.period,
                 )
                 for x in scheduled_task_request.schedules
             ]
@@ -212,7 +218,11 @@ async def update_schedule_task(
                 )
                 schedules = [
                     ttm.ScheduledTaskSchedule(
-                        scheduled_task=scheduled_task, **x.model_dump()
+                        start_from=to_utc(x.start_from),
+                        until=to_utc(x.until),
+                        at=x.at,
+                        every=x.every,
+                        period=x.period,
                     )
                     for x in scheduled_task_request.schedules
                 ]
@@ -242,7 +252,14 @@ async def update_schedule_task(
 
                 await task.save()
                 schedules = [
-                    ttm.ScheduledTaskSchedule(scheduled_task=task, **x.model_dump())
+                    ttm.ScheduledTaskSchedule(
+                        scheduled_task=task,
+                        start_from=to_utc(x.start_from),
+                        until=to_utc(x.until),
+                        at=x.at,
+                        every=x.every,
+                        period=x.period,
+                    )
                     for x in scheduled_task_request.schedules
                 ]
 

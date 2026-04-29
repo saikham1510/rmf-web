@@ -4,6 +4,7 @@ from tortoise.fields import (
     DatetimeField,
     ForeignKeyField,
     ForeignKeyRelation,
+    IntField,
     JSONField,
     ReverseRelation,
 )
@@ -22,10 +23,10 @@ class TaskState(Model):
     data = JSONField()
     category = CharField(255, null=True, index=True)
     assigned_to = CharField(255, null=True, index=True)
-    unix_millis_start_time = DatetimeField(null=True, index=True)
-    unix_millis_finish_time = DatetimeField(null=True, index=True)
+    unix_millis_start_time = IntField(null=True, index=True)
+    unix_millis_finish_time = IntField(null=True, index=True)
     status = CharField(255, null=True, index=True)
-    unix_millis_request_time = DatetimeField(null=True, index=True)
+    unix_millis_request_time = IntField(null=True, index=True)
     requester = CharField(255, null=True, index=True)
     labels: ReverseRelation["TaskLabel"]
 
@@ -89,7 +90,7 @@ class TaskEventLogPhasesEventsLog(Model, LogMixin):
 class TaskFavorite(Model):
     id = CharField(255, pk=True, source_field="id")
     name = CharField(255, null=False, index=True)
-    unix_millis_earliest_start_time = DatetimeField(null=True, index=True)
+    unix_millis_earliest_start_time = IntField(null=True, index=True)
     priority = JSONField(null=True)
     category = CharField(255, null=False, index=True)
     description = JSONField()

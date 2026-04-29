@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, time, timezone
 from enum import Enum
 
 import schedule
@@ -62,10 +62,9 @@ class ScheduledTaskSchedule(Model):
         else:
             job = schedule.every()
         if self.until is not None:
-            # schedule uses `datetime.now()`, which is tz naive
-            # Assuming self.until is a datetime object with timezone information
-            # Convert the timestamp to datetime without changing the timezone
-            job = job.until(datetime.utcfromtimestamp(self.until.timestamp()))
+            # Convert timezone-aware datetime to naive UTC datetime for schedule library
+            dt_utc = self.until.astimezone(timezone.utc).replace(tzinfo=None)
+            job = job.until(dt_utc)
 
         if self.period in (
             ScheduledTaskSchedule.Period.Monday,
@@ -89,6 +88,11 @@ class ScheduledTaskSchedule(Model):
         # Hashable value in order to tag the job with a unique identifier
         job.tag(self._id)
         if self.at is not None:
-            job = job.at(self.at)
+            # Parse time string (e.g., "07:30") as UTC
+            # self.at comes from frontend in UTC format
+            hours, minutes = map(int, self.at.split(":"))
+            # Create a timezone-aware datetime in UTC for reference
+            t = time(hours, minutes)
+            job = job.at(f"{hours:02d}:{minutes:02d}")
 
         return job
