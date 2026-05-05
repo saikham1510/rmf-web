@@ -21,6 +21,9 @@ class AppConfig:
     aud: str
     iss: Optional[str]
     ros_args: List[str]
+    # Whether the API server should execute scheduled tasks in-process.
+    # When False, an external bridge may execute schedules in sim environments.
+    execute_schedules: bool
 
     def __post_init__(self):
         self.public_url = urllib.parse.urlparse(cast(str, self.public_url))
