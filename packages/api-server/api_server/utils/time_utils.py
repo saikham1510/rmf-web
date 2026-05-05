@@ -3,10 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-# Optional simulation offset in milliseconds (wall_time - sim_time).
-# When None, conversions are identity (assume wall==sim).
-_sim_offset_ms: Optional[int] = None
-
 
 def now_wall_millis() -> int:
     """Return current wall-clock time in UTC as unix milliseconds."""
@@ -28,40 +24,29 @@ def wall_millis_to_datetime(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
 
 
-def set_sim_offset_ms(offset_ms: int) -> None:
-    """Set the sim offset such that: wall_ms - sim_ms = offset_ms."""
-    global _sim_offset_ms
-    _sim_offset_ms = int(offset_ms)
+def sim_to_real(sim_time: int, now_sim: int, now_real: int) -> int:
+    """Convert simulation time to real (wall-clock) time using current time pairs.
 
+    Args:
+        sim_time: Timestamp in simulation time (milliseconds)
+        now_sim: Current simulation time (milliseconds), from ROS clock
+        now_real: Current real wall-clock time (milliseconds), from time.time()
 
-def clear_sim_offset() -> None:
-    """Clear any previously set sim offset (fall back to wall==sim)."""
-    global _sim_offset_ms
-    _sim_offset_ms = None
-
-
-def compute_and_set_offset(sim_ms: int, wall_ms: int) -> int:
-    """Compute offset from sim and wall times, set it, and return it."""
-    offset = wall_ms - sim_ms
-    set_sim_offset_ms(offset)
-    return offset
-
-
-def wall_to_sim_millis(wall_ms: int) -> int:
-    """Convert a wall-clock millis to sim millis using the configured offset.
-
-    If no offset is configured, returns the input unchanged.
+    Returns:
+        Timestamp in real (wall-clock) time (milliseconds)
     """
-    if _sim_offset_ms is None:
-        return int(wall_ms)
-    return int(wall_ms - _sim_offset_ms)
+    return int(now_real + (sim_time - now_sim))
 
 
-def sim_to_wall_millis(sim_ms: int) -> int:
-    """Convert sim millis to wall-clock millis using the configured offset.
+def real_to_sim(real_time: int, now_real: int, now_sim: int) -> int:
+    """Convert real (wall-clock) time to simulation time using current time pairs.
 
-    If no offset is configured, returns the input unchanged.
+    Args:
+        real_time: Timestamp in real (wall-clock) time (milliseconds)
+        now_real: Current real wall-clock time (milliseconds), from time.time()
+        now_sim: Current simulation time (milliseconds), from ROS clock
+
+    Returns:
+        Timestamp in simulation time (milliseconds)
     """
-    if _sim_offset_ms is None:
-        return int(sim_ms)
-    return int(sim_ms + _sim_offset_ms)
+    return int(now_sim + (real_time - now_real))

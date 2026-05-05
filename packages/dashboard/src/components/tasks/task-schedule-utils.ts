@@ -3,7 +3,6 @@ import { ScheduledTask, ScheduledTaskSchedule as ApiSchedule } from 'api-client'
 import {
   addMinutes,
   endOfDay,
-  endOfMinute,
   isFriday,
   isMonday,
   isSaturday,
@@ -18,7 +17,6 @@ import {
   nextThursday,
   nextTuesday,
   nextWednesday,
-  startOfMinute,
 } from 'date-fns';
 import { getShortDescription, RecurringDays, Schedule } from 'react-components';
 
@@ -52,8 +50,8 @@ export const scheduleToEvents = (
   cur.setHours(hours);
   cur.setMinutes(minutes);
 
-  const scheStartFrom = schedule.start_from ? startOfMinute(new Date(schedule.start_from)) : null;
-  const scheUntil = schedule.until ? endOfMinute(new Date(schedule.until)) : null;
+  const scheStartFrom = schedule.start_from ? new Date(schedule.start_from) : null;
+  const scheUntil = schedule.until ? new Date(schedule.until) : null;
 
   let period = 8.64e7; // 1 day
   switch (schedule.period) {
@@ -125,7 +123,9 @@ export const scheduleWithSelectedDay = (scheduleTask: ApiSchedule[], date: Date)
   daysArray[adjustedIndex - 1] = true;
 
   return {
-    startOn: scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
+    startOn: scheduleTask[0].start_from
+      ? new Date(scheduleTask[0].start_from)
+      : new Date(new Date().toUTCString()),
     days: daysArray,
     until: endOfDay(new Date(date.toISOString())),
     at: scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
@@ -149,7 +149,7 @@ export const apiScheduleToSchedule = (scheduleTask: ApiSchedule[]): Schedule => 
   return {
     startOn: scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
     days: daysArray,
-    until: scheduleTask[0].until ? endOfMinute(new Date(scheduleTask[0].until)) : undefined,
+    until: scheduleTask[0].until ? new Date(scheduleTask[0].until) : undefined,
     at: scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
   };
 };

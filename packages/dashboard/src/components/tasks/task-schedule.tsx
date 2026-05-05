@@ -215,6 +215,7 @@ export const TaskSchedule = () => {
       } else {
         await rmf.tasksApi.delScheduledTasksScheduledTasksTaskIdDelete(task.id);
       }
+
       AppEvents.refreshTaskApp.next();
 
       // Set the default values
