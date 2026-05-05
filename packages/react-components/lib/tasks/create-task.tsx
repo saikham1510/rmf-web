@@ -1056,6 +1056,7 @@ export function CreateTaskForm({
                     <Grid item xs={10}>
                       <DateTimePicker
                         inputFormat={'MM/dd/yyyy HH:mm'}
+                        minutesStep={1}
                         value={
                           taskRequest.unix_millis_earliest_start_time
                             ? new Date(taskRequest.unix_millis_earliest_start_time)
@@ -1235,6 +1236,7 @@ export function CreateTaskForm({
             </Grid>
             <Grid item xs={6}>
               <TimePicker
+                minutesStep={1}
                 value={schedule.at}
                 onChange={(date) => {
                   if (!date) {

@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -64,36 +65,37 @@ class TaskRepository:
 
         existing_task_state = await DbTaskState.get_or_none(id_=task_state.booking.id)
 
-        start_time = task_state.unix_millis_start_time
-        if not start_time or start_time <= 0:
-            start_time = (
-                existing_task_state.unix_millis_start_time
-                if existing_task_state and existing_task_state.unix_millis_start_time
-                else now_millis
-            )
+        # RULE: Convert RMF input ONCE on arrival, store real-time only.
+        # Do NOT re-normalize values pulled from the database.
 
-        request_time = task_state.booking.unix_millis_request_time
-        if not request_time or request_time <= 0:
-            request_time = (
-                existing_task_state.unix_millis_request_time
-                if existing_task_state and existing_task_state.unix_millis_request_time
-                else now_millis
-            )
-
-        # get previous DB value (ONLY source of truth)
-        finish_time = (
-            existing_task_state.unix_millis_finish_time if existing_task_state else None
+        # Use incoming RMF values directly if valid, else use DB or current time
+        start_time = task_state.unix_millis_start_time or (
+            existing_task_state.unix_millis_start_time
+            if existing_task_state
+            else now_millis
         )
 
-        # ONLY set ON FIRST completion event
-        if task_state.status and task_state.status.value == "completed":
-            if not finish_time:
-                finish_time = now_millis
+        request_time = task_state.booking.unix_millis_request_time or (
+            existing_task_state.unix_millis_request_time
+            if existing_task_state
+            else now_millis
+        )
+
+        finish_time = task_state.unix_millis_finish_time or (
+            existing_task_state.unix_millis_finish_time if existing_task_state else None
+        )
+        if (
+            task_state.status
+            and task_state.status.value == "completed"
+            and not finish_time
+        ):
+            finish_time = now_wall_millis()
+            task_state.unix_millis_finish_time = finish_time
 
         async with in_transaction():
             db_task_state, created = await DbTaskState.update_or_create(
                 {
-                    "data": task_state.model_dump_json(),
+                    "data": json.loads(task_state.model_dump_json()),
                     "category": task_state.category.root
                     if task_state.category
                     else None,

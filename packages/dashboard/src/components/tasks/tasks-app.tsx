@@ -164,8 +164,10 @@ export const TasksApp = React.memo(
             } else if (filterOperator && filterOperator === 'onOrAfter') {
               // Enforce an upper limit which is 24 hours ahead of the current time
               const now = new Date();
-              const upperLimit = now.getTime() + 86400000;
-              filterValue = `${selectedTime.getTime()},${upperLimit}`;
+              const lowerLimit = 0; // Start from the beginning of time (1970)
+              const upperLimit = new Date().getTime() + 86400000;
+              // This ensures the filter catches the 1970 'Simulation' timestamps
+              filterValue = `0,${upperLimit}`;
             }
           }
         }
@@ -202,22 +204,9 @@ export const TasksApp = React.memo(
             undefined,
           );
           const results = (resp.data as TaskState[]).map((task) => {
-            const request = task.booking.unix_millis_request_time;
-
-            const start = task.unix_millis_start_time;
-            const finish = task.unix_millis_finish_time;
-
-            const fixedStart =
-              request != null && start && start < 1000000000000 ? request + start : start;
-
-            const fixedFinish =
-              request != null && finish && finish < 1000000000000 ? request + finish : finish;
-
-            return {
-              ...task,
-              unix_millis_start_time: fixedStart,
-              unix_millis_finish_time: fixedFinish,
-            };
+            // DB timestamps are FINAL real-time values.
+            // NEVER re-interpret or re-normalize them.
+            return task;
           });
           const visibleResults = results.filter((task) => !isInternalFleetAdapterTask(task));
           const newTasks = visibleResults.slice(0, GET_LIMIT);
@@ -235,23 +224,12 @@ export const TasksApp = React.memo(
           subs.push(
             ...newTasks.map((task) =>
               rmf.getTaskStateObs(task.booking.id).subscribe((updatedTask) => {
-                const request = updatedTask.booking.unix_millis_request_time;
-
-                const start = updatedTask.unix_millis_start_time;
-                const finish = updatedTask.unix_millis_finish_time;
-
-                const normalizedTask = {
-                  ...updatedTask,
-                  unix_millis_start_time:
-                    request != null && start && start < 1000000000000 ? request + start : start,
-                  unix_millis_finish_time:
-                    request != null && finish && finish < 1000000000000 ? request + finish : finish,
-                };
-
+                // DB timestamps are FINAL real-time values.
+                // NEVER re-interpret or re-normalize them.
                 setTasksState((prev) => ({
                   ...prev,
                   data: prev.data.map((row) =>
-                    row.booking.id === normalizedTask.booking.id ? normalizedTask : row,
+                    row.booking.id === updatedTask.booking.id ? updatedTask : row,
                   ),
                 }));
               }),

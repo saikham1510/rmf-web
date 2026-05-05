@@ -121,20 +121,25 @@ async def lifespan(_app: FastIO):
     )
     await health_watchdog.start()
 
-    logger.info("starting scheduler")
-    asyncio.create_task(_spin_scheduler())
-    scheduled_tasks = await ttm.ScheduledTask.all()
-    scheduled = 0
-    for t in scheduled_tasks:
-        user = await User.load_from_db(t.created_by)
-        if user is None:
-            logger.warning(f"user [{t.created_by}] does not exist")
-            continue
-        task_repo = TaskRepository(user)
-        await routes.scheduled_tasks.schedule_task(t, task_repo)
-        scheduled += 1
-    logger.info(f"loaded {scheduled} tasks")
-    logger.info("successfully started scheduler")
+    if getattr(app_config, "execute_schedules", False):
+        logger.info("starting scheduler")
+        asyncio.create_task(_spin_scheduler())
+        scheduled_tasks = await ttm.ScheduledTask.all()
+        scheduled = 0
+        for t in scheduled_tasks:
+            user = await User.load_from_db(t.created_by)
+            if user is None:
+                logger.warning(f"user [{t.created_by}] does not exist")
+                continue
+            task_repo = TaskRepository(user)
+            await routes.scheduled_tasks.schedule_task(t, task_repo)
+            scheduled += 1
+        logger.info(f"loaded {scheduled} tasks")
+        logger.info("successfully started scheduler")
+    else:
+        logger.info(
+            "scheduler disabled (execute_schedules=False); backend will not execute scheduled tasks"
+        )
 
     ros.spin_background()
     logger.info("started app")

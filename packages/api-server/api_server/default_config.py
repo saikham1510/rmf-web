@@ -32,4 +32,7 @@ config = {
     # e.g.
     #   Run with sim time: ["-p", "use_sim_time:=true"]
     "ros_args": [],
+    # Whether the API server should execute scheduled tasks in-process.
+    # Set to False for simulations where a Bridge translates UTC -> sim time and executes tasks.
+    "execute_schedules": False,
 }

@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time as pytime
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -8,6 +10,7 @@ from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel
 from tortoise.expressions import Q
 
+from api_server.app_config import app_config
 from api_server.authenticator import user_dep
 from api_server.dependencies import pagination_query
 from api_server.fast_io import FastIORouter
@@ -27,6 +30,37 @@ from api_server.utils.time_utils import now_wall_millis, wall_millis_to_datetime
 from .tasks import post_dispatch_task
 
 router = FastIORouter(tags=["Tasks"])
+
+
+def dispatch_task_now(sche, run_fn):
+    logger.info(f" Immediate dispatch for schedule {sche.get_id()}")
+    asyncio.get_event_loop().create_task(run_fn())
+
+
+def handle_schedule_start(sche, run_fn):
+    now = datetime.now(timezone.utc)
+
+    # CASE 1: run immediately
+    if sche.start_from is None or sche.start_from <= now:
+        dispatch_task_now(sche, run_fn)
+        return
+
+    # CASE 2: future execution
+    delay = (sche.start_from - now).total_seconds()
+
+    def delayed():
+        pytime.sleep(delay)
+        dispatch_task_now(sche, run_fn)
+
+    threading.Thread(target=delayed, daemon=True).start()
+
+
+def normalize_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        raise ValueError("Datetime must include timezone information")
+    return dt.astimezone(timezone.utc)
 
 
 class PostScheduledTaskRequest(BaseModel):
@@ -59,15 +93,28 @@ async def schedule_task(task: ttm.ScheduledTask, task_repo: TaskRepository):
         task.last_ran = wall_millis_to_datetime(now_wall_millis())
         await task.save()
 
-    def do():
+    def do(sche: ttm.ScheduledTaskSchedule):
         logger.info(f"starting task {task.pk}")
-        datetime_to_iso = wall_millis_to_datetime(now_wall_millis()).isoformat()
-        if task.except_dates and datetime_to_iso[:10] in task.except_dates:
+        now = wall_millis_to_datetime(now_wall_millis())
+
+        if sche.start_from is not None and now < sche.start_from:
+            return
+        if sche.until is not None and now > sche.until:
+            return
+
+        if sche.start_from is not None and now < sche.start_from:
             return
         asyncio.get_event_loop().create_task(run())
 
-    for _, j in jobs:
-        j.do(do)
+    # If execution is disabled, only validate schedules (jobs were constructed above)
+    if not getattr(app_config, "execute_schedules", False):
+        logger.info(
+            "execute_schedules disabled; schedules validated but not registered for execution"
+        )
+        return
+
+    for sche, j in jobs:
+        j.do(lambda sche=sche: do(sche))
     logger.info(f"scheduled task [{task.pk}]")
 
 
@@ -102,8 +149,8 @@ async def post_scheduled_task(
             schedules = [
                 ttm.ScheduledTaskSchedule(
                     scheduled_task=scheduled_task,
-                    start_from=x.start_from,
-                    until=x.until,
+                    start_from=normalize_to_utc(x.start_from),
+                    until=normalize_to_utc(x.until),
                     at=x.at,
                     every=x.every,
                     period=x.period,
@@ -164,7 +211,7 @@ async def del_scheduled_tasks_event(
     if task is None:
         raise HTTPException(404)
 
-    event_date_str = event_date.isoformat()
+    event_date_str = normalize_to_utc(event_date).isoformat()
     if not isinstance(task.except_dates, list):
         logger.error(f"task.except_dates is not a list: {type(task.except_dates)}")
         raise HTTPException(500)
@@ -196,7 +243,7 @@ async def update_schedule_task(
 
         async with tortoise.transactions.in_transaction():
             if except_date:
-                event_date_str = except_date.isoformat()
+                event_date_str = normalize_to_utc(except_date).isoformat()
                 if not isinstance(task.except_dates, list):
                     logger.error(
                         f"task.except_dates is not a list: {type(task.except_dates)}"
@@ -218,8 +265,9 @@ async def update_schedule_task(
                 )
                 schedules = [
                     ttm.ScheduledTaskSchedule(
-                        start_from=to_utc(x.start_from),
-                        until=to_utc(x.until),
+                        scheduled_task=scheduled_task,
+                        start_from=normalize_to_utc(x.start_from),
+                        until=normalize_to_utc(x.until),
                         at=x.at,
                         every=x.every,
                         period=x.period,
@@ -254,8 +302,8 @@ async def update_schedule_task(
                 schedules = [
                     ttm.ScheduledTaskSchedule(
                         scheduled_task=task,
-                        start_from=to_utc(x.start_from),
-                        until=to_utc(x.until),
+                        start_from=normalize_to_utc(x.start_from),
+                        until=normalize_to_utc(x.until),
                         at=x.at,
                         every=x.every,
                         period=x.period,

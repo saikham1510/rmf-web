@@ -2,6 +2,23 @@ import { PostScheduledTaskRequest, TaskRequest, TaskState } from 'api-client';
 import { Schedule } from 'react-components';
 import schema from 'api-client/dist/schema';
 import { ajv } from '../utils';
+/**
+ * Helper to determine if a value is a real-world epoch timestamp
+ * or a small simulation counter.
+ */
+const formatTimestamp = (millis: number): string => {
+  // Threshold: ~January 1971.
+  // If the number is smaller than this, it's likely "seconds/millis since start"
+  if (millis < 31536000000) {
+    const seconds = Math.floor(millis / 1000);
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `Sim Time: ${h}h ${m}m ${s}s`;
+  }
+  // Otherwise, treat as real UTC date
+  return new Date(millis).toISOString().replace('T', ' ').slice(0, 19);
+};
 
 export function parseTasksFile(contents: string): TaskRequest[] {
   const obj = JSON.parse(contents) as unknown[];
@@ -61,25 +78,24 @@ export function downloadCsvMinimal(timestamp: Date, allTasks: TaskState[]) {
   ];
   let csvContent = keys.join(columnSeparator) + rowSeparator;
   allTasks.forEach((task) => {
+    // DB timestamps are FINAL real-time values. Convert directly to ISO strings.
+    const requestTime = task.booking.unix_millis_request_time;
+    const startTimeStr = task.unix_millis_start_time
+      ? new Date(task.unix_millis_start_time).toISOString().replace('T', ' ').slice(0, 19)
+      : 'unknown';
+
+    const endTimeStr = task.unix_millis_finish_time
+      ? new Date(task.unix_millis_finish_time).toISOString().replace('T', ' ').slice(0, 19)
+      : 'unknown';
     const values = [
-      task.booking.unix_millis_request_time
-        ? `${new Date(task.booking.unix_millis_request_time).toLocaleDateString()}`
-        : 'unknown',
-      task.booking.requester ? task.booking.requester : 'unknown',
-      task.booking.id,
-      task.category ? task.category : 'unknown',
-      task.assigned_to ? task.assigned_to.name : 'unknown',
-      task.unix_millis_start_time
-        ? `${new Date(task.unix_millis_start_time).toLocaleDateString()} ${new Date(
-            task.unix_millis_start_time,
-          ).toLocaleTimeString()}`
-        : 'unknown',
-      task.unix_millis_finish_time
-        ? `${new Date(task.unix_millis_finish_time).toLocaleDateString()} ${new Date(
-            task.unix_millis_finish_time,
-          ).toLocaleTimeString()}`
-        : 'unknown',
-      task.status ? task.status : 'unknown',
+      requestTime ? new Date(requestTime).toLocaleDateString() : 'unknown', // Date
+      task.booking.requester || 'unknown', // Requester
+      task.booking.id, // ID
+      task.category || 'unknown', // Category
+      task.assigned_to?.name || 'unknown', // Assignee
+      startTimeStr, // Start Time (Fixed 2026)
+      endTimeStr, // End Time (Fixed 2026)
+      task.status || 'unknown',
     ];
     csvContent += values.join(columnSeparator) + rowSeparator;
   });
@@ -99,16 +115,20 @@ export const toApiSchedule = (
   taskRequest: TaskRequest,
   schedule: Schedule,
 ): PostScheduledTaskRequest => {
-  const start = schedule.startOn;
-  const apiSchedules: PostScheduledTaskRequest['schedules'] = [];
-  const utcDate = new Date(start);
+  let start = new Date(schedule.startOn);
+  if (start.getTime() < 31536000000) {
+    start = new Date(); // Fallback to current real time
+  }
 
-  const start_from = utcDate.toISOString();
-  const hours = utcDate.getUTCHours().toString().padStart(2, '0');
-  const minutes = utcDate.getUTCMinutes().toString().padStart(2, '0');
+  const apiSchedules: PostScheduledTaskRequest['schedules'] = [];
+
+  const start_from = start.toISOString();
   const until = schedule.until?.toISOString();
 
-  const at = `${hours}:${minutes}`;
+  // Extract hours/minutes from UTC, NOT browser local time
+  const utcHours = start.getUTCHours().toString().padStart(2, '0');
+  const utcMinutes = start.getUTCMinutes().toString().padStart(2, '0');
+  const at = `${utcHours}:${utcMinutes}`;
   schedule.days[0] && apiSchedules.push({ period: 'monday', start_from, at, until });
   schedule.days[1] && apiSchedules.push({ period: 'tuesday', start_from, at, until });
   schedule.days[2] && apiSchedules.push({ period: 'wednesday', start_from, at, until });
