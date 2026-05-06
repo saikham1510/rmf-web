@@ -89,21 +89,42 @@ async def schedule_task(task: ttm.ScheduledTask, task_repo: TaskRepository):
     )
 
     async def run():
+        logger.info(f"scheduled task [{task.pk}] run() calling RMF dispatch")
         await post_dispatch_task(req, task_repo)
+        logger.info(f"scheduled task [{task.pk}] run() RMF dispatch returned success")
         task.last_ran = wall_millis_to_datetime(now_wall_millis())
         await task.save()
 
     def do(sche: ttm.ScheduledTaskSchedule):
-        logger.info(f"starting task {task.pk}")
         now = wall_millis_to_datetime(now_wall_millis())
+        logger.info(
+            "scheduled task [%s] do() now=%s start_from=%s until=%s",
+            task.pk,
+            now.isoformat(),
+            sche.start_from.isoformat() if sche.start_from is not None else None,
+            sche.until.isoformat() if sche.until is not None else None,
+        )
 
         if sche.start_from is not None and now < sche.start_from:
+            logger.info(
+                "scheduled task [%s] do() skipped: now < start_from",
+                task.pk,
+            )
             return
         if sche.until is not None and now > sche.until:
+            logger.info(
+                "scheduled task [%s] do() skipped: now > until",
+                task.pk,
+            )
             return
 
         if sche.start_from is not None and now < sche.start_from:
+            logger.info(
+                "scheduled task [%s] do() skipped by repeated start_from check",
+                task.pk,
+            )
             return
+        logger.info(f"scheduled task [{task.pk}] do() executing run()")
         asyncio.get_event_loop().create_task(run())
 
     # If execution is disabled, only validate schedules (jobs were constructed above)
@@ -115,6 +136,16 @@ async def schedule_task(task: ttm.ScheduledTask, task_repo: TaskRepository):
 
     for sche, j in jobs:
         j.do(lambda sche=sche: do(sche))
+        logger.info(
+            "scheduled task [%s] registered job schedule_id=%s at=%s period=%s every=%s start_from=%s until=%s",
+            task.pk,
+            sche.get_id(),
+            sche.at,
+            sche.period,
+            sche.every,
+            sche.start_from.isoformat() if sche.start_from is not None else None,
+            sche.until.isoformat() if sche.until is not None else None,
+        )
     logger.info(f"scheduled task [{task.pk}]")
 
 
