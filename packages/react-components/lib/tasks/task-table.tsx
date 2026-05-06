@@ -109,17 +109,21 @@ function TaskRow({ task, onClick }: TaskRowProps) {
         onMouseOut={() => setHover(false)}
       >
         <TableCell>
-          {task.unix_millis_start_time
-            ? new Date(task.unix_millis_start_time).toLocaleDateString()
-            : 'unknown'}
+          {task.booking.unix_millis_earliest_start_time
+            ? new Date(task.booking.unix_millis_earliest_start_time).toLocaleDateString()
+            : task.unix_millis_start_time
+              ? new Date(task.unix_millis_start_time).toLocaleDateString()
+              : 'unknown'}
         </TableCell>
         <TableCell>{task.booking.id}</TableCell>
         <TableCell>{task.category}</TableCell>
         <TableCell>{task.assigned_to ? task.assigned_to.name : 'unknown'}</TableCell>
         <TableCell>
-          {task.unix_millis_start_time
-            ? new Date(task.unix_millis_start_time).toLocaleTimeString()
-            : '-'}
+          {task.booking.unix_millis_earliest_start_time
+            ? new Date(task.booking.unix_millis_earliest_start_time).toLocaleTimeString()
+            : task.unix_millis_start_time
+              ? new Date(task.unix_millis_start_time).toLocaleTimeString()
+              : '-'}
         </TableCell>
         <TableCell>
           {task.unix_millis_finish_time

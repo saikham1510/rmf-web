@@ -121,7 +121,7 @@ async def lifespan(_app: FastIO):
     )
     await health_watchdog.start()
 
-    if getattr(app_config, "execute_schedules", False):
+    if getattr(app_config, "execute_schedules", True):
         logger.info("starting scheduler")
         asyncio.create_task(_spin_scheduler())
         scheduled_tasks = await ttm.ScheduledTask.all()

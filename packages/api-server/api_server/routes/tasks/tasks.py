@@ -13,6 +13,7 @@ from api_server.dependencies import (
     start_time_between_query,
 )
 from api_server.fast_io import FastIORouter, SubscriptionRequest
+from api_server.logger import logger
 from api_server.repositories import TaskRepository, task_repo_dep
 from api_server.response import RawJSONResponse
 from api_server.rmf_io import task_events, tasks_service
@@ -144,14 +145,25 @@ async def post_dispatch_task(
     request: mdl.DispatchTaskRequest = Body(...),
     task_repo: TaskRepository = Depends(task_repo_dep),
 ):
+    logger.info(
+        "post_dispatch_task() calling RMF service task_id=%s request_type=%s",
+        getattr(request.request, "task_id", None),
+        request.type,
+    )
     resp = mdl.TaskDispatchResponse.model_validate_json(
         await tasks_service().call(request.model_dump_json(exclude_none=True))
     )
     if not resp.root.success:
+        logger.info("post_dispatch_task() RMF service returned failure")
         return RawJSONResponse(resp.model_dump_json(), 400)
     task_state = cast(mdl.TaskDispatchResponse1, resp.root).state
     await task_repo.save_task_state(task_state)
     await task_repo.save_task_request(task_state.booking.id, request.request)
+    logger.info(
+        "post_dispatch_task() RMF dispatch success booking_id=%s task_id=%s",
+        task_state.booking.id,
+        task_state.booking.id,
+    )
     return resp
 
 

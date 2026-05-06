@@ -55,6 +55,11 @@ async def process_msg(msg: Dict[str, Any], fleet_repo: FleetRepository) -> None:
     if payload_type == "task_state_update":
         task_state = mdl.TaskState(**msg["data"])
         # RULE: Convert RMF input ONCE at ingestion boundary and persist
+        logger.info(
+            "RMF task_state_update received booking_id=%s status=%s",
+            task_state.booking.id,
+            task_state.status,
+        )
         await task_repo.save_task_state(task_state)
         task_events.task_states.on_next(task_state)
 

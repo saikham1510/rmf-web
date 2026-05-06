@@ -63,11 +63,28 @@ class ScheduledTaskSchedule(Model):
             job = schedule.every()
 
         if self.at is not None:
-            job = job.at(self.at)
+            # Use `start_from` as the single source of truth when present.
+            # Normalize `start_from` to UTC and derive HH:MM from that UTC
+            # instant to pass into `job.at()`. Fall back to `self.at` if
+            # `start_from` isn't set.
+            if self.start_from is not None:
+                sf = self.start_from
+                if sf.tzinfo is None:
+                    sf = sf.replace(tzinfo=timezone.utc)
+                sf_utc = sf.astimezone(timezone.utc)
+                at_str = f"{sf_utc.hour:02d}:{sf_utc.minute:02d}"
+                job = job.at(at_str)
+            else:
+                job = job.at(self.at)
 
-        # schedule library requires naive datetime
+        # schedule library requires naive datetime for `.until()`; normalize
+        # `until` to UTC and pass a naive UTC-localized datetime.
         if self.until is not None:
-            job = job.until(self.until.replace(tzinfo=None))
+            u = self.until
+            if u.tzinfo is None:
+                u = u.replace(tzinfo=timezone.utc)
+            u_utc = u.astimezone(timezone.utc)
+            job = job.until(u_utc.replace(tzinfo=None))
 
         if self.period in (
             ScheduledTaskSchedule.Period.Monday,
