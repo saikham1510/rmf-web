@@ -229,7 +229,7 @@ function DeliveryTaskForm({
         <TextField
           id="pickup_sku"
           fullWidth
-          label="Pickup SKU"
+          label="Pickup Item"
           value={taskDesc.pickup.payload.sku}
           required
           onChange={(ev) => {
@@ -305,7 +305,7 @@ function DeliveryTaskForm({
         <TextField
           id="dropoff_sku"
           fullWidth
-          label="Dropoff SKU"
+          label="Dropoff Item"
           value={taskDesc.dropoff.payload.sku}
           required
           onChange={(ev) => {
@@ -669,6 +669,7 @@ export interface CreateTaskFormProps
    * Shows extra UI elements suitable for submittng batched tasks. Default to 'false'.
    */
   user: string;
+  showScheduleButton?: boolean;
   allowBatch?: boolean;
   cleaningZones?: string[];
   patrolWaypoints?: string[];
@@ -691,6 +692,7 @@ export interface CreateTaskFormProps
 
 export function CreateTaskForm({
   user,
+  showScheduleButton = true,
   cleaningZones = [],
   patrolWaypoints = [],
   pickupPoints = {},
@@ -764,7 +766,7 @@ export function CreateTaskForm({
   };
   // schedule is not supported with batch upload
   const scheduleEnabled = taskRequests.length === 1;
-  const startTimeEnabled = taskRequest.category === 'clean';
+  const startTimeEnabled = taskRequest.category === 'clean' || taskRequest.category === 'patrol';
 
   const updateTasks = () => {
     setTaskRequests((prev) => {
@@ -826,7 +828,7 @@ export function CreateTaskForm({
     }
     taskRequest.description = newDesc;
     taskRequest.category = newCategory;
-    if (newCategory !== 'clean') {
+    if (newCategory === 'delivery') {
       taskRequest.unix_millis_earliest_start_time = 0;
     }
 
@@ -835,7 +837,7 @@ export function CreateTaskForm({
       category: newCategory,
       description: newDesc,
       unix_millis_earliest_start_time:
-        newCategory === 'clean' ? favoriteTaskBuffer.unix_millis_earliest_start_time : 0,
+        newCategory === 'delivery' ? 0 : favoriteTaskBuffer.unix_millis_earliest_start_time,
     });
 
     updateTasks();
@@ -853,7 +855,7 @@ export function CreateTaskForm({
     for (const t of taskRequests) {
       t.requester = requester;
       t.unix_millis_request_time = Date.now();
-      if (t.category !== 'clean') {
+      if (t.category === 'delivery') {
         t.unix_millis_earliest_start_time = 0;
       }
     }
@@ -1150,15 +1152,17 @@ export function CreateTaskForm({
             >
               Cancel
             </Button>
-            <Button
-              variant="contained"
-              color="primary"
-              disabled={submitting || !formFullyFilled}
-              className={classes.actionBtn}
-              onClick={() => setOpenSchedulingDialog(true)}
-            >
-              {scheduleToEdit ? 'Edit schedule' : 'Add to Schedule'}
-            </Button>
+            {showScheduleButton && (
+              <Button
+                variant="contained"
+                color="primary"
+                disabled={submitting || !formFullyFilled}
+                className={classes.actionBtn}
+                onClick={() => setOpenSchedulingDialog(true)}
+              >
+                {scheduleToEdit ? 'Edit schedule' : 'Add to Schedule'}
+              </Button>
+            )}
             <Button
               variant="contained"
               type="submit"
