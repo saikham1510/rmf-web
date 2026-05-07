@@ -72,27 +72,30 @@ export function RobotDataGridTable({ onRobotClick, robots }: RobotDataGridTableP
     );
   };
 
-  const [timeOffsetMs, setTimeOffsetMs] = React.useState<number | null>(null);
-
-  React.useEffect(() => {
-    const rawTs: number[] = [];
+  const effectiveTimeOffsetMs = React.useMemo(() => {
+    const simSecondTs: number[] = [];
     for (const r of robots) {
-      if (r.estFinishTime !== undefined && r.estFinishTime !== null) rawTs.push(r.estFinishTime);
-      if (r.lastUpdateTime !== undefined && r.lastUpdateTime !== null) rawTs.push(r.lastUpdateTime);
+      if (
+        r.estFinishTime !== undefined &&
+        r.estFinishTime !== null &&
+        r.estFinishTime > 0 &&
+        r.estFinishTime < 1e12
+      ) {
+        simSecondTs.push(r.estFinishTime);
+      }
+      if (
+        r.lastUpdateTime !== undefined &&
+        r.lastUpdateTime !== null &&
+        r.lastUpdateTime > 0 &&
+        r.lastUpdateTime < 1e12
+      ) {
+        simSecondTs.push(r.lastUpdateTime);
+      }
     }
-    if (rawTs.length === 0) return;
-    const maxRaw = Math.max(...rawTs);
-    if (maxRaw > 1e12) {
-      if (timeOffsetMs !== 0) setTimeOffsetMs(0);
-      return;
-    }
-    if (timeOffsetMs === null) {
-      const simNowMs = maxRaw * 1000;
-      setTimeOffsetMs(Date.now() - simNowMs);
-    }
-  }, [robots, timeOffsetMs]);
-
-  const effectiveTimeOffsetMs = timeOffsetMs ?? 0;
+    if (simSecondTs.length === 0) return 0;
+    const simNowMs = Math.max(...simSecondTs) * 1000;
+    return Date.now() - simNowMs;
+  }, [robots]);
 
   const toDate = React.useCallback(
     (ts?: number): Date | null => {
