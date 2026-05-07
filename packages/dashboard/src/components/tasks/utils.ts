@@ -124,6 +124,10 @@ export const toApiSchedule = (
 
   const start_from = start.toISOString();
   const until = schedule.until?.toISOString();
+  const scheduledTaskRequest: TaskRequest = {
+    ...taskRequest,
+    unix_millis_earliest_start_time: start.valueOf(),
+  };
 
   // Extract hours/minutes from UTC, NOT browser local time
   const utcHours = start.getUTCHours().toString().padStart(2, '0');
@@ -137,7 +141,7 @@ export const toApiSchedule = (
   schedule.days[5] && apiSchedules.push({ period: 'saturday', start_from, at, until });
   schedule.days[6] && apiSchedules.push({ period: 'sunday', start_from, at, until });
   return {
-    task_request: taskRequest,
+    task_request: scheduledTaskRequest,
     schedules: apiSchedules,
   };
 };

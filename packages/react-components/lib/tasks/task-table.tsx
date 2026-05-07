@@ -119,19 +119,21 @@ function TaskRow({ task, onClick, resolveTaskEventDate }: TaskRowProps) {
         onMouseOut={() => setHover(false)}
       >
         <TableCell>
-          {(() => {
-            const d = resolveTaskEventDate(task.booking.id, 'start', task.unix_millis_start_time);
-            return d ? d.toLocaleDateString() : 'unknown';
-          })()}
+          {task.booking.unix_millis_earliest_start_time
+            ? new Date(task.booking.unix_millis_earliest_start_time).toLocaleDateString()
+            : task.unix_millis_start_time
+              ? new Date(task.unix_millis_start_time).toLocaleDateString()
+              : 'unknown'}
         </TableCell>
         <TableCell>{task.booking.id}</TableCell>
         <TableCell>{task.category}</TableCell>
         <TableCell>{task.assigned_to ? task.assigned_to.name : 'unknown'}</TableCell>
         <TableCell>
-          {(() => {
-            const d = resolveTaskEventDate(task.booking.id, 'start', task.unix_millis_start_time);
-            return d ? d.toLocaleTimeString() : '-';
-          })()}
+          {task.booking.unix_millis_earliest_start_time
+            ? new Date(task.booking.unix_millis_earliest_start_time).toLocaleTimeString()
+            : task.unix_millis_start_time
+              ? new Date(task.unix_millis_start_time).toLocaleTimeString()
+              : '-'}
         </TableCell>
         <TableCell>
           {(() => {
