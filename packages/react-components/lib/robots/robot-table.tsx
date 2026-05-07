@@ -119,31 +119,24 @@ export interface RobotTableProps extends TableProps {
 }
 
 export function RobotTable({ robots, onRobotClick, ...otherProps }: RobotTableProps): JSX.Element {
-  // Keep sim "now" aligned with wall-clock "now" even if simulation runs faster/slower.
-  // Only use second-based values for offset calculation to avoid mixing with epoch ms fields.
+  // Keep sim "now" aligned with wall-clock "now" while preventing stale fleet
+  // updates from pulling the inferred sim clock backward.
+  const latestSimSecondMsRef = React.useRef<number>(0);
+
   const effectiveTimeOffsetMs = React.useMemo(() => {
-    const simSecondTs: number[] = [];
+    let latestSimSecondMs = latestSimSecondMsRef.current;
+
     for (const r of robots) {
-      if (
-        r.estFinishTime !== undefined &&
-        r.estFinishTime !== null &&
-        r.estFinishTime > 0 &&
-        r.estFinishTime < 1e12
-      ) {
-        simSecondTs.push(r.estFinishTime);
-      }
-      if (
-        r.lastUpdateTime !== undefined &&
-        r.lastUpdateTime !== null &&
-        r.lastUpdateTime > 0 &&
-        r.lastUpdateTime < 1e12
-      ) {
-        simSecondTs.push(r.lastUpdateTime);
+      const candidateTimes = [r.estFinishTime, r.lastUpdateTime];
+      for (const candidate of candidateTimes) {
+        if (candidate !== undefined && candidate !== null && candidate > 0 && candidate < 1e12) {
+          latestSimSecondMs = Math.max(latestSimSecondMs, candidate * 1000);
+        }
       }
     }
-    if (simSecondTs.length === 0) return 0;
-    const simNowMs = Math.max(...simSecondTs) * 1000;
-    return Date.now() - simNowMs;
+
+    latestSimSecondMsRef.current = latestSimSecondMs;
+    return latestSimSecondMs > 0 ? Date.now() - latestSimSecondMs : 0;
   }, [robots]);
   return (
     <Table stickyHeader size="small" style={{ tableLayout: 'fixed' }} {...otherProps}>

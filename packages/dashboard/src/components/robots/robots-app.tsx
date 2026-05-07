@@ -78,7 +78,8 @@ export const RobotsApp = createMicroApp('Robots', () => {
                       tasks[robot.task_id] &&
                       tasks[robot.task_id].unix_millis_finish_time) ||
                     undefined,
-                  lastUpdateTime: robot.unix_millis_time ? robot.unix_millis_time : undefined,
+                  // Use dashboard receipt time so display is stable and reflects when the UI saw the update
+                  lastUpdateTime: Date.now(),
                   level: robot.location?.map || 'N/A',
                 }))
               : [],
