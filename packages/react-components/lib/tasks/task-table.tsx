@@ -76,11 +76,21 @@ const StyledTable = styled((props: TableProps) => <Table {...props} />)(({ theme
 interface TaskRowProps {
   task: TaskState;
   onClick: React.MouseEventHandler<HTMLTableRowElement>;
+  resolveTaskEventDate: (
+    taskId: string,
+    field: 'start' | 'finish',
+    ts?: number | null,
+  ) => Date | null;
 }
 
-function TaskRow({ task, onClick }: TaskRowProps) {
+function TaskRow({ task, onClick, resolveTaskEventDate }: TaskRowProps) {
   // replace all temp info
   const [hover, setHover] = React.useState(false);
+
+  const hasConcreteEndTime =
+    task.status === TaskStatus.Completed ||
+    task.status === TaskStatus.Failed ||
+    task.status === TaskStatus.Canceled;
 
   const getTaskStateCellClass = (task: TaskState) => {
     switch (task.status) {
@@ -109,22 +119,26 @@ function TaskRow({ task, onClick }: TaskRowProps) {
         onMouseOut={() => setHover(false)}
       >
         <TableCell>
-          {task.unix_millis_start_time
-            ? new Date(task.unix_millis_start_time).toLocaleDateString()
-            : 'unknown'}
+          {(() => {
+            const d = resolveTaskEventDate(task.booking.id, 'start', task.unix_millis_start_time);
+            return d ? d.toLocaleDateString() : 'unknown';
+          })()}
         </TableCell>
         <TableCell>{task.booking.id}</TableCell>
         <TableCell>{task.category}</TableCell>
         <TableCell>{task.assigned_to ? task.assigned_to.name : 'unknown'}</TableCell>
         <TableCell>
-          {task.unix_millis_start_time
-            ? new Date(task.unix_millis_start_time).toLocaleTimeString()
-            : '-'}
+          {(() => {
+            const d = resolveTaskEventDate(task.booking.id, 'start', task.unix_millis_start_time);
+            return d ? d.toLocaleTimeString() : '-';
+          })()}
         </TableCell>
         <TableCell>
-          {task.unix_millis_finish_time
-            ? new Date(task.unix_millis_finish_time).toLocaleTimeString()
-            : '-'}
+          {(() => {
+            if (!hasConcreteEndTime) return '-';
+            const d = resolveTaskEventDate(task.booking.id, 'finish', task.unix_millis_finish_time);
+            return d ? d.toLocaleTimeString() : '-';
+          })()}
         </TableCell>
         <TableCell className={taskStateCellClass}>{task.status || 'unknown'}</TableCell>
       </TableRow>
@@ -158,6 +172,29 @@ export function TaskTable({
   onDateTitleClick,
   chronologicalOrder,
 }: TaskTableProps): JSX.Element {
+  const receiveTimeCacheRef = React.useRef<Map<string, number>>(new Map());
+
+  const resolveTaskEventDate = React.useCallback(
+    (taskId: string, field: 'start' | 'finish', ts?: number | null): Date | null => {
+      if (ts === undefined || ts === null || ts <= 0) return null;
+
+      if (ts > 1e12) {
+        return new Date(ts);
+      }
+
+      const cacheKey = `${taskId}:${field}:${ts}`;
+      const cached = receiveTimeCacheRef.current.get(cacheKey);
+      if (cached !== undefined) {
+        return new Date(cached);
+      }
+
+      const receiveTime = Date.now();
+      receiveTimeCacheRef.current.set(cacheKey, receiveTime);
+      return new Date(receiveTime);
+    },
+    [],
+  );
+
   return (
     <StyledTable stickyHeader size="small">
       <TableHead>
@@ -169,7 +206,9 @@ export function TaskTable({
           >
             <Button
               variant="text"
-              onClick={(ev) => onDateTitleClick && onDateTitleClick(ev)}
+              onClick={(ev: React.MouseEvent<HTMLButtonElement>) =>
+                onDateTitleClick && onDateTitleClick(ev)
+              }
               sx={{
                 color: 'inherit',
                 textTransform: 'none',
@@ -194,6 +233,7 @@ export function TaskTable({
           <TaskRow
             key={task.booking.id}
             task={task}
+            resolveTaskEventDate={resolveTaskEventDate}
             onClick={(ev) => onTaskClick && onTaskClick(ev, task)}
           />
         ))}
