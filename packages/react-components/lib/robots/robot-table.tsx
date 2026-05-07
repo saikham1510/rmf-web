@@ -119,34 +119,32 @@ export interface RobotTableProps extends TableProps {
 }
 
 export function RobotTable({ robots, onRobotClick, ...otherProps }: RobotTableProps): JSX.Element {
-  // Compute a stable offset that maps simulation timestamps to real time.
-  // Initialize offset once when we first see small (second) timestamps and keep it
-  // so values do not jump when data updates frequently. If we later detect the
-  // incoming timestamps are real epoch milliseconds, reset offset to zero.
-  const [timeOffsetMs, setTimeOffsetMs] = React.useState<number | null>(null);
-
-  React.useEffect(() => {
-    const rawTs: number[] = [];
+  // Keep sim "now" aligned with wall-clock "now" even if simulation runs faster/slower.
+  // Only use second-based values for offset calculation to avoid mixing with epoch ms fields.
+  const effectiveTimeOffsetMs = React.useMemo(() => {
+    const simSecondTs: number[] = [];
     for (const r of robots) {
-      if (r.estFinishTime !== undefined && r.estFinishTime !== null) rawTs.push(r.estFinishTime);
-      if (r.lastUpdateTime !== undefined && r.lastUpdateTime !== null) rawTs.push(r.lastUpdateTime);
+      if (
+        r.estFinishTime !== undefined &&
+        r.estFinishTime !== null &&
+        r.estFinishTime > 0 &&
+        r.estFinishTime < 1e12
+      ) {
+        simSecondTs.push(r.estFinishTime);
+      }
+      if (
+        r.lastUpdateTime !== undefined &&
+        r.lastUpdateTime !== null &&
+        r.lastUpdateTime > 0 &&
+        r.lastUpdateTime < 1e12
+      ) {
+        simSecondTs.push(r.lastUpdateTime);
+      }
     }
-    if (rawTs.length === 0) return;
-    const maxRaw = Math.max(...rawTs);
-    if (maxRaw > 1e12) {
-      // timestamps already in ms - ensure offset is zero
-      if (timeOffsetMs !== 0) setTimeOffsetMs(0);
-      return;
-    }
-    // Only initialize offset once to avoid flicker. Use the first observed sim "now".
-    if (timeOffsetMs === null) {
-      const simNowMs = maxRaw * 1000;
-      setTimeOffsetMs(Date.now() - simNowMs);
-    }
-  }, [robots, timeOffsetMs]);
-
-  // Use 0 if offset still uninitialized
-  const effectiveTimeOffsetMs = timeOffsetMs ?? 0;
+    if (simSecondTs.length === 0) return 0;
+    const simNowMs = Math.max(...simSecondTs) * 1000;
+    return Date.now() - simNowMs;
+  }, [robots]);
   return (
     <Table stickyHeader size="small" style={{ tableLayout: 'fixed' }} {...otherProps}>
       <TableHead>
@@ -164,7 +162,7 @@ export function RobotTable({ robots, onRobotClick, ...otherProps }: RobotTablePr
           <RobotRow
             key={robot_id}
             {...robot}
-            timeOffsetMs={timeOffsetMs ?? undefined}
+            timeOffsetMs={effectiveTimeOffsetMs}
             onClick={(ev) => onRobotClick && onRobotClick(ev, robot)}
           />
         ))}
