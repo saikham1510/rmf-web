@@ -241,15 +241,10 @@ export function TaskDataGridTable({
       field: 'unix_millis_start_time',
       headerName: 'Start Time',
       renderCell: (cellValues) => {
-        const scheduledStart = cellValues.row.booking.unix_millis_earliest_start_time;
         const start = cellValues.row.unix_millis_start_time;
         const request = cellValues.row.booking.unix_millis_request_time;
-
-        const displayTime = isValidTimestamp(scheduledStart)
-          ? scheduledStart
-          : isValidTimestamp(start)
-            ? start
-            : request;
+        const displayDate = resolveTaskEventDate(cellValues.row.booking.id, 'start', start);
+        const fallbackDate = isValidTimestamp(request) ? new Date(request) : null;
 
         return (
           <TextField
