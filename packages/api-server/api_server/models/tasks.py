@@ -27,6 +27,7 @@ class ScheduledTaskSchedule(BaseModel):
     until: datetime | None = None
     period: Period
     at: str | None = None
+    dispatched: bool = False
 
 
 class ScheduledTask(BaseModel):
