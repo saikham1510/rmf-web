@@ -242,20 +242,12 @@ export function TaskDataGridTable({
       headerName: 'Start Time',
       renderCell: (cellValues) => {
         const start = cellValues.row.unix_millis_start_time;
-        const request = cellValues.row.booking.unix_millis_request_time;
         const displayDate = resolveTaskEventDate(cellValues.row.booking.id, 'start', start);
-        const fallbackDate = isValidTimestamp(request) ? new Date(request) : null;
 
         return (
           <TextField
             variant="standard"
-            value={
-              displayDate
-                ? formatDateTime(displayDate)
-                : fallbackDate
-                  ? formatDateTime(fallbackDate)
-                  : '-'
-            }
+            value={displayDate ? formatDateTime(displayDate) : '-'}
             InputProps={{ disableUnderline: true }}
             multiline
           />

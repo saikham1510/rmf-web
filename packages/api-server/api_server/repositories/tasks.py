@@ -70,9 +70,7 @@ class TaskRepository:
 
         # Use incoming RMF values directly if valid, else use DB or current time
         start_time = task_state.unix_millis_start_time or (
-            existing_task_state.unix_millis_start_time
-            if existing_task_state
-            else now_millis
+            existing_task_state.unix_millis_start_time if existing_task_state else None
         )
 
         request_time = task_state.booking.unix_millis_request_time or (

@@ -766,6 +766,8 @@ export function CreateTaskForm({
   };
   // schedule is not supported with batch upload
   const scheduleEnabled = taskRequests.length === 1;
+  const scheduleSupportedCategory =
+    taskRequest.category === 'clean' || taskRequest.category === 'patrol';
   const startTimeEnabled = taskRequest.category === 'clean' || taskRequest.category === 'patrol';
 
   const updateTasks = () => {
@@ -1156,7 +1158,7 @@ export function CreateTaskForm({
               <Button
                 variant="contained"
                 color="primary"
-                disabled={submitting || !formFullyFilled}
+                disabled={submitting || !formFullyFilled || !scheduleSupportedCategory}
                 className={classes.actionBtn}
                 onClick={() => setOpenSchedulingDialog(true)}
               >
