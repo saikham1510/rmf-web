@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "start-api-server",
+			"type": "shell",
+			"command": "env RMF_API_SERVER_LOG_LEVEL=INFO pnpm start",
+			"isBackground": true,
+			"group": "build"
+		}
+	]
+}
