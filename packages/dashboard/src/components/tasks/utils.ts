@@ -122,7 +122,10 @@ export const toApiSchedule = (
 
   const apiSchedules: PostScheduledTaskRequest['schedules'] = [];
 
-  const start_from = start.toISOString();
+  // Set start_from to midnight on the picked date (beginning of day in local timezone)
+  const startOfDay = new Date(start);
+  startOfDay.setHours(0, 0, 0, 0);
+  const start_from = startOfDay.toISOString();
   const until = schedule.until?.toISOString();
   const scheduledTaskRequest: TaskRequest = {
     ...taskRequest,
