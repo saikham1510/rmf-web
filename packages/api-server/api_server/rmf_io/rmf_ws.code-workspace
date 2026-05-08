@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../rmf_ws"
+		},
+		{
+			"path": "../../../.."
+		},
+		{
+			"path": "../../../../../rmf-custom-tools-new"
+		}
+	],
+	"settings": {}
+}
