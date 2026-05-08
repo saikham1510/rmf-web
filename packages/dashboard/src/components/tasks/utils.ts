@@ -129,10 +129,10 @@ export const toApiSchedule = (
     unix_millis_earliest_start_time: start.valueOf(),
   };
 
-  // Extract hours/minutes from UTC, NOT browser local time
-  const utcHours = start.getUTCHours().toString().padStart(2, '0');
-  const utcMinutes = start.getUTCMinutes().toString().padStart(2, '0');
-  const at = `${utcHours}:${utcMinutes}`;
+  // Extract hours/minutes from local time (user picked time in their timezone)
+  const localHours = start.getHours().toString().padStart(2, '0');
+  const localMinutes = start.getMinutes().toString().padStart(2, '0');
+  const at = `${localHours}:${localMinutes}`;
   schedule.days[0] && apiSchedules.push({ period: 'monday', start_from, at, until });
   schedule.days[1] && apiSchedules.push({ period: 'tuesday', start_from, at, until });
   schedule.days[2] && apiSchedules.push({ period: 'wednesday', start_from, at, until });

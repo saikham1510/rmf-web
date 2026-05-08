@@ -62,6 +62,25 @@ class ScheduledTaskSchedule(Model):
         else:
             job = schedule.every()
 
+        if self.period in (
+            ScheduledTaskSchedule.Period.Monday,
+            ScheduledTaskSchedule.Period.Tuesday,
+            ScheduledTaskSchedule.Period.Wednesday,
+            ScheduledTaskSchedule.Period.Thursday,
+            ScheduledTaskSchedule.Period.Friday,
+            ScheduledTaskSchedule.Period.Saturday,
+            ScheduledTaskSchedule.Period.Sunday,
+        ):
+            job = getattr(job, self.period)
+        elif self.period == ScheduledTaskSchedule.Period.Day:
+            job = job.days
+        elif self.period == ScheduledTaskSchedule.Period.Hour:
+            job = job.hours
+        elif self.period == ScheduledTaskSchedule.Period.Minute:
+            job = job.minutes
+        else:
+            raise ValueError("invalid period")
+
         if self.at is not None:
             # Use `start_from` as the single source of truth when present.
             # Normalize `start_from` to UTC and derive HH:MM from that UTC
@@ -85,25 +104,6 @@ class ScheduledTaskSchedule(Model):
                 u = u.replace(tzinfo=timezone.utc)
             u_utc = u.astimezone(timezone.utc)
             job = job.until(u_utc.replace(tzinfo=None))
-
-        if self.period in (
-            ScheduledTaskSchedule.Period.Monday,
-            ScheduledTaskSchedule.Period.Tuesday,
-            ScheduledTaskSchedule.Period.Wednesday,
-            ScheduledTaskSchedule.Period.Thursday,
-            ScheduledTaskSchedule.Period.Friday,
-            ScheduledTaskSchedule.Period.Saturday,
-            ScheduledTaskSchedule.Period.Sunday,
-        ):
-            job = getattr(job, self.period)
-        elif self.period == ScheduledTaskSchedule.Period.Day:
-            job = job.days
-        elif self.period == ScheduledTaskSchedule.Period.Hour:
-            job = job.hours
-        elif self.period == ScheduledTaskSchedule.Period.Minute:
-            job = job.minutes
-        else:
-            raise ValueError("invalid period")
 
         # Hashable value in order to tag the job with a unique identifier
         job.tag(self._id)
