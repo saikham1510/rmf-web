@@ -43,13 +43,12 @@ def task_log_has_error(task_log: mdl.TaskEventLog) -> bool:
 
 async def process_msg(msg: Dict[str, Any], fleet_repo: FleetRepository) -> None:
     if "type" not in msg:
-        logger.warn(msg)
-        logger.warn("Ignoring message, 'type' must include in msg field")
-        return
+        logger.warning("Ignoring message (missing 'type'): %s", msg)
+        raise ValueError("missing 'type' field in message")
     payload_type: str = msg["type"]
     if not isinstance(payload_type, str):
-        logger.warn("error processing message, 'type' must be a string")
-        return
+        logger.warning("error processing message, 'type' must be a string: %s", msg)
+        raise ValueError("'type' field must be a string")
     logger.debug(msg)
 
     if payload_type == "task_state_update":
@@ -95,7 +94,36 @@ async def rmf_gateway(websocket: WebSocket):
     fleet_repo = FleetRepository(user)
     try:
         while True:
-            msg: Dict[str, Any] = await websocket.receive_json()
-            await process_msg(msg, fleet_repo)
+            try:
+                msg: Dict[str, Any] = await websocket.receive_json()
+            except Exception as e:
+                # Could not parse JSON — log and notify client
+                logger.warning("Failed to receive/parse websocket message: %s", e)
+                await websocket.send_json({"type": "error", "message": "invalid json"})
+                continue
+
+            try:
+                await process_msg(msg, fleet_repo)
+            except ValueError as e:
+                # Malformed payload — log and notify client
+                logger.warning("Malformed gateway message: %s error=%s", msg, e)
+                try:
+                    await websocket.send_json({"type": "error", "message": str(e)})
+                except Exception:
+                    logger.exception(
+                        "Failed to send error response to websocket client"
+                    )
+                continue
+            except Exception:
+                logger.exception("Unexpected error processing gateway message")
+                try:
+                    await websocket.send_json(
+                        {"type": "error", "message": "internal server error"}
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to send internal error to websocket client"
+                    )
+                continue
     except WebSocketDisconnect:
         pass
