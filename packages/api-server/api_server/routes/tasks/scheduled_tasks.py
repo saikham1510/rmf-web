@@ -1,5 +1,7 @@
 import asyncio
-import traceback
+import json
+import threading
+import time as pytime
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -37,10 +39,26 @@ def normalize_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
-def _ensure_utc_aware(dt: datetime) -> datetime:
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+def validate_schedules(schedules: list[ScheduledTaskSchedule]) -> None:
+    """Validate that at least one schedule produces a valid job. Raises HTTPException if none do."""
+    valid_count = 0
+    for sche in schedules:
+        try:
+            db_sche = ttm.ScheduledTaskSchedule(
+                every=sche.every,
+                start_from=normalize_to_utc(sche.start_from),
+                until=normalize_to_utc(sche.until),
+                period=sche.period,
+                at=sche.at,
+            )
+            # Try to construct a job; if successful, this schedule is valid.
+            # `to_job()` is defined on the Tortoise model, not the Pydantic request model.
+            db_sche.to_job()
+            valid_count += 1
+        except schedule.ScheduleValueError:
+            pass
+    if valid_count == 0:
+        raise HTTPException(422, "Task is never going to run")
 
 
 class PostScheduledTaskRequest(BaseModel):
@@ -48,34 +66,47 @@ class PostScheduledTaskRequest(BaseModel):
     schedules: list[ScheduledTaskSchedule]
 
 
-def _load_task_request(payload: object) -> TaskRequest:
-    if isinstance(payload, TaskRequest):
-        return payload
-    if isinstance(payload, str):
-        return TaskRequest.model_validate_json(payload)
-    return TaskRequest.model_validate(payload)
-
-
-async def _dispatch_scheduled_schedule(schedule_id: int):
-    # Load fresh ORM objects inside the background task to avoid using
-    # ORM instances created in another coroutine/thread
-    schedule = await ttm.ScheduledTaskSchedule.get_or_none(
-        _id=schedule_id
-    ).prefetch_related("scheduled_task")
-    if schedule is None:
+async def schedule_task(task: ttm.ScheduledTask, task_repo: TaskRepository):
+    await task.fetch_related("schedules")
+    jobs: list[tuple[ttm.ScheduledTaskSchedule, schedule.Job]] = []
+    for sche in task.schedules:
+        try:
+            jobs.append((sche, sche.to_job()))
+        except schedule.ScheduleValueError:
+            pass
+    # Note: validation of at least one valid schedule happens in post_scheduled_task() before DB insert,
+    # so we should never reach len(jobs) == 0 here. But keep as safety check.
+    if len(jobs) == 0:
         logger.warning(
-            "scheduled task schedule_id=%s disappeared before dispatch", schedule_id
+            f"scheduled task [{task.pk}] has no valid schedules (should not happen)"
         )
         return
-    task = schedule.scheduled_task
-    user = await User.load_from_db(task.created_by)
-    if user is None:
-        logger.warning(
-            "scheduled task schedule_id=%s skipped because creator user [%s] does not exist",
-            schedule.get_id(),
-            task.created_by,
+
+    if not isinstance(task.task_request, dict):
+        try:
+            task_request_data = json.loads(task.task_request)
+        except Exception as e:
+            logger.error(
+                f"task_request is not a dict or JSON string: {type(task.task_request)}"
+            )
+            raise HTTPException(500) from e
+    else:
+        task_request_data = task.task_request
+
+    async def run():
+        task_request = TaskRequest(**task_request_data)
+        # The scheduler trigger time is authoritative; dispatch immediately when it fires.
+        task_request.unix_millis_earliest_start_time = 0
+        task_request.unix_millis_request_time = now_wall_millis()
+        req = DispatchTaskRequest(
+            type="dispatch_task_request",
+            request=task_request,
         )
-        return
+        logger.info(f"scheduled task [{task.pk}] run() calling RMF dispatch")
+        await post_dispatch_task(req, task_repo)
+        logger.info(f"scheduled task [{task.pk}] run() RMF dispatch returned success")
+        task.last_ran = wall_millis_to_datetime(now_wall_millis())
+        await task.save()
 
     try:
         logger.info(
@@ -232,21 +263,18 @@ async def post_scheduled_task(
     | - | - | minute | :17 | Every 17th sec of a mintue |
     | 5 | 10 | seconds | - | Every 5-10 seconds (randomly) |
     """
-    if len(scheduled_task_request.schedules) == 0:
-        raise HTTPException(422, "Task is never going to run")
+    # Validate schedules BEFORE entering transaction to avoid rollback on validation failure
+    validate_schedules(scheduled_task_request.schedules)
 
-    async with tortoise.transactions.in_transaction():
-        scheduled_task = await ttm.ScheduledTask.create(
-            task_request=scheduled_task_request.task_request.model_dump_json(
-                exclude_none=True
-            ),
-            created_by=user.username,
-        )
-        schedules = []
-        for schedule_request in scheduled_task_request.schedules:
-            if schedule_request.start_from is None:
-                raise HTTPException(422, "start_from is required for scheduled tasks")
-            schedules.append(
+    try:
+        async with tortoise.transactions.in_transaction():
+            scheduled_task = await ttm.ScheduledTask.create(
+                task_request=scheduled_task_request.task_request.model_dump(
+                    exclude_none=True
+                ),
+                created_by=user.username,
+            )
+            schedules = [
                 ttm.ScheduledTaskSchedule(
                     scheduled_task=scheduled_task,
                     start_from=normalize_to_utc(schedule_request.start_from),
@@ -258,7 +286,12 @@ async def post_scheduled_task(
                 )
             )
 
-        await ttm.ScheduledTaskSchedule.bulk_create(schedules)
+            await schedule_task(scheduled_task, task_repo)
+        scheduled_task = await ttm.ScheduledTask.get_or_none(
+            id=scheduled_task.id
+        ).prefetch_related("schedules")
+        if scheduled_task is None:
+            raise HTTPException(500)
         return ScheduledTask.model_validate(scheduled_task)
 
 
@@ -308,6 +341,8 @@ async def del_scheduled_tasks_event(
         raise HTTPException(404)
 
     event_date_str = normalize_to_utc(event_date).isoformat()
+    if task.except_dates is None:
+        task.except_dates = []
     if not isinstance(task.except_dates, list):
         logger.error(f"task.except_dates is not a list: {type(task.except_dates)}")
         raise HTTPException(500)
@@ -321,9 +356,31 @@ async def update_schedule_task(
     scheduled_task_request: PostScheduledTaskRequest,
     except_date: Optional[datetime] = None,
 ):
-    task = await get_scheduled_task(task_id)
-    if task is None:
-        raise HTTPException(404)
+    try:
+        task = await get_scheduled_task(task_id)
+        if task is None:
+            raise HTTPException(404)
+        # If "except_date" is provided, it means a single event is being updated.
+        # In this case, we perform the following steps:
+        #   1. Add the "except_date" to the list of exception dates for the task.
+        #   2. Clear all existing schedules associated with the task.
+        #   3. Create a new scheduled task with the requested data from the schedule form.
+
+        async with tortoise.transactions.in_transaction():
+            if except_date:
+                event_date_str = normalize_to_utc(except_date).isoformat()
+                if task.except_dates is None:
+                    task.except_dates = []
+                if not isinstance(task.except_dates, list):
+                    logger.error(
+                        f"task.except_dates is not a list: {type(task.except_dates)}"
+                    )
+                    raise HTTPException(500)
+                task.except_dates.append(event_date_str[:10])
+                await task.save()
+
+                for sche in task.schedules:
+                    schedule.clear(sche.get_id())
 
     if len(scheduled_task_request.schedules) == 0:
         raise HTTPException(422, "Task is never going to run")

@@ -54,3 +54,47 @@ class ScheduledTaskSchedule(Model):
 
     def get_id(self) -> int:
         return self._id
+
+    def to_job(self) -> Job:
+        if self.every is not None:
+            job = schedule.every(self.every)
+        else:
+            job = schedule.every()
+
+        if self.period in (
+            ScheduledTaskSchedule.Period.Monday,
+            ScheduledTaskSchedule.Period.Tuesday,
+            ScheduledTaskSchedule.Period.Wednesday,
+            ScheduledTaskSchedule.Period.Thursday,
+            ScheduledTaskSchedule.Period.Friday,
+            ScheduledTaskSchedule.Period.Saturday,
+            ScheduledTaskSchedule.Period.Sunday,
+        ):
+            job = getattr(job, self.period)
+        elif self.period == ScheduledTaskSchedule.Period.Day:
+            job = job.days
+        elif self.period == ScheduledTaskSchedule.Period.Hour:
+            job = job.hours
+        elif self.period == ScheduledTaskSchedule.Period.Minute:
+            job = job.minutes
+        else:
+            raise ValueError("invalid period")
+
+        if self.at is not None:
+            # Use the `at` field directly as the time to run the job.
+            # The `at` field contains local time (HH:MM format from user's browser).
+            job = job.at(self.at)
+
+        # schedule library requires naive datetime for `.until()`; normalize
+        # `until` to UTC and pass a naive UTC-localized datetime.
+        if self.until is not None:
+            u = self.until
+            if u.tzinfo is None:
+                u = u.replace(tzinfo=timezone.utc)
+            u_utc = u.astimezone(timezone.utc)
+            job = job.until(u_utc.replace(tzinfo=None))
+
+        # Hashable value in order to tag the job with a unique identifier
+        job.tag(self._id)
+
+        return job
