@@ -1,9 +1,7 @@
-from datetime import datetime, time, timezone
 from enum import Enum
 
-import schedule
-from schedule import Job
 from tortoise.fields import (
+    BooleanField,
     CharEnumField,
     CharField,
     DatetimeField,
@@ -52,6 +50,7 @@ class ScheduledTaskSchedule(Model):
     until = DatetimeField(null=True)
     period = CharEnumField(Period)
     at = CharField(255, null=True)
+    dispatched = BooleanField(default=False)
 
     def get_id(self) -> int:
         return self._id

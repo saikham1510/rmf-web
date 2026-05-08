@@ -46,6 +46,9 @@ class RmfService:
         self.ros_node = ros_node
         self._logger = logger.getChild(self.__class__.__name__)
         self._requests: Dict[str, Future] = {}
+        # Event loop and lock for thread-safe cross-thread interactions
+        self._loop = asyncio.get_event_loop()
+        self._lock = threading.Lock()
         self._api_pub = self.ros_node().create_publisher(
             ApiRequest,
             request_topic,
@@ -77,19 +80,23 @@ class RmfService:
         self._api_sub.destroy()
         self._api_pub.destroy()
 
-    async def call(self, payload: str, timeout: float = 10) -> str:
+    async def call(self, payload: str, timeout: float = 120) -> str:
         # LIFECYCLE RULE: request_id is generated ONLY here, at execution time
         # Default timeout increased to 10s to allow RMF processing time
         # Late responses after timeout are correctly ignored (logged as "unknown request_id")
         req_id = str(uuid4())
         msg = ApiRequest(request_id=req_id, json_msg=payload)
-        fut = Future()
+        # Create Future tied to the event loop and store it in a thread-safe way
+        fut = self._loop.create_future()
+
+        self._logger.info("SEND ID: %s", req_id)
 
         # LIFECYCLE RULE: store request in active map only during execution
-        if req_id in self._requests:
-            # This should never happen (uuid4 collision is astronomically rare)
-            raise RuntimeError(f"UUID collision detected for request_id: {req_id}")
-        self._requests[req_id] = fut
+        with self._lock:
+            if req_id in self._requests:
+                # This should never happen (uuid4 collision is astronomically rare)
+                raise RuntimeError(f"UUID collision detected for request_id: {req_id}")
+            self._requests[req_id] = fut
 
         self._logger.info(
             "publishing RMF request request_id=%s timestamp=%s topic=%s",
@@ -120,13 +127,14 @@ class RmfService:
         finally:
             # LIFECYCLE RULE: delete request_id after success, timeout, or exception
             # This ensures request_id is never reused or persisted for future execution
-            if req_id in self._requests:
-                del self._requests[req_id]
-                self._logger.debug(
-                    "cleaned up request_id=%s remaining_active=%d",
-                    req_id,
-                    len(self._requests),
-                )
+            with self._lock:
+                if req_id in self._requests:
+                    del self._requests[req_id]
+                    self._logger.debug(
+                        "cleaned up request_id=%s remaining_active=%d",
+                        req_id,
+                        len(self._requests),
+                    )
 
     def _handle_response(self, msg: ApiResponse):
         """
@@ -140,11 +148,14 @@ class RmfService:
         - Response arrives AFTER timeout → request_id already deleted, this is OK
           (late response is correctly ignored; request is no longer relevant)
         """
+        self._logger.info("RECV ID: %s", msg.request_id)
         self._logger.info(f"got response '{msg.request_id}'")
         self._logger.debug(msg)
 
         # LIFECYCLE RULE: Only active requests should have entries in _requests
-        fut = self._requests.get(msg.request_id)
+        # Thread-safe lookup of the Future
+        with self._lock:
+            fut = self._requests.get(msg.request_id)
         if fut is None:
             # This is EXPECTED and CORRECT when:
             # 1. Response arrived after timeout (5s default) and cleanup in finally
@@ -158,8 +169,17 @@ class RmfService:
             )
             return
 
-        # Response matched to active request: resolve Future
-        fut.set_result(msg.json_msg)
+        # Response matched to active request: resolve Future on the event loop thread
+        try:
+            self._loop.call_soon_threadsafe(fut.set_result, msg.json_msg)
+        except Exception:
+            # As a fallback, try to set directly and log if it fails
+            try:
+                fut.set_result(msg.json_msg)
+            except Exception:
+                self._logger.exception(
+                    "Failed to set result for request_id=%s", msg.request_id
+                )
 
 
 _tasks_service: Optional[RmfService] = None
