@@ -115,9 +115,7 @@ function isValidTimestamp(value: number | null | undefined): boolean {
   return !!value && value >= 1000000000000;
 }
 
-function formatDateTime(millis: number, dateOnly = false): string {
-  const d = new Date(millis);
-
+function formatDateTime(d: Date, dateOnly = false): string {
   if (Number.isNaN(d.getTime())) return 'unknown';
 
   if (dateOnly) return d.toLocaleDateString();
@@ -133,6 +131,29 @@ export function TaskDataGridTable({
   setFilterFields,
   setSortFields,
 }: TableDataGridState): JSX.Element {
+  const receiveTimeCacheRef = React.useRef<Map<string, number>>(new Map());
+
+  const resolveTaskEventDate = React.useCallback(
+    (taskId: string, field: 'start' | 'finish', ts?: number | null): Date | null => {
+      if (ts === undefined || ts === null || ts <= 0) return null;
+
+      if (ts > 1e12) {
+        return new Date(ts);
+      }
+
+      const cacheKey = `${taskId}:${field}:${ts}`;
+      const cached = receiveTimeCacheRef.current.get(cacheKey);
+      if (cached !== undefined) {
+        return new Date(cached);
+      }
+
+      const receiveTime = Date.now();
+      receiveTimeCacheRef.current.set(cacheKey, receiveTime);
+      return new Date(receiveTime);
+    },
+    [],
+  );
+
   const handleEvent: GridEventListener<'rowClick'> = (
     params: GridRowParams,
     event: MuiMouseEvent,
@@ -160,12 +181,12 @@ export function TaskDataGridTable({
       renderCell: (cellValues) => {
         const requestTime = cellValues.row.booking.unix_millis_request_time;
 
-        const displayTime = isValidTimestamp(requestTime) ? requestTime : Date.now();
+        const displayDate = isValidTimestamp(requestTime) ? new Date(requestTime) : new Date();
 
         return (
           <TextField
             variant="standard"
-            value={formatDateTime(displayTime, true)}
+            value={formatDateTime(displayDate, true)}
             InputProps={{ disableUnderline: true }}
             multiline
           />
@@ -220,20 +241,13 @@ export function TaskDataGridTable({
       field: 'unix_millis_start_time',
       headerName: 'Start Time',
       renderCell: (cellValues) => {
-        const scheduledStart = cellValues.row.booking.unix_millis_earliest_start_time;
         const start = cellValues.row.unix_millis_start_time;
-        const request = cellValues.row.booking.unix_millis_request_time;
-
-        const displayTime = isValidTimestamp(scheduledStart)
-          ? scheduledStart
-          : isValidTimestamp(start)
-            ? start
-            : request;
+        const displayDate = resolveTaskEventDate(cellValues.row.booking.id, 'start', start);
 
         return (
           <TextField
             variant="standard"
-            value={formatDateTime(displayTime)}
+            value={displayDate ? formatDateTime(displayDate) : '-'}
             InputProps={{ disableUnderline: true }}
             multiline
           />
@@ -244,14 +258,30 @@ export function TaskDataGridTable({
       field: 'unix_millis_finish_time',
       headerName: 'End Time',
       renderCell: (cellValues) => {
+        const status = cellValues.row.status;
+        const hasConcreteEndTime =
+          status === TaskStatus.Completed ||
+          status === TaskStatus.Failed ||
+          status === TaskStatus.Canceled;
+        if (!hasConcreteEndTime) {
+          return (
+            <TextField
+              variant="standard"
+              value={'-'}
+              InputProps={{ disableUnderline: true }}
+              multiline
+            />
+          );
+        }
+
         const finish = cellValues.row.unix_millis_finish_time;
 
-        const displayTime = isValidTimestamp(finish) ? finish : null;
+        const displayDate = resolveTaskEventDate(cellValues.row.booking.id, 'finish', finish);
 
         return (
           <TextField
             variant="standard"
-            value={displayTime ? formatDateTime(displayTime) : '-'}
+            value={displayDate ? formatDateTime(displayDate) : '-'}
             InputProps={{ disableUnderline: true }}
             multiline
           />

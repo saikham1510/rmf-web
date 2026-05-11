@@ -72,6 +72,34 @@ export function RobotDataGridTable({ onRobotClick, robots }: RobotDataGridTableP
     );
   };
 
+  const latestSimSecondMsRef = React.useRef<number>(0);
+
+  const effectiveTimeOffsetMs = React.useMemo(() => {
+    let latestSimSecondMs = latestSimSecondMsRef.current;
+
+    for (const r of robots) {
+      const candidateTimes = [r.estFinishTime, r.lastUpdateTime];
+      for (const candidate of candidateTimes) {
+        if (candidate !== undefined && candidate !== null && candidate > 0 && candidate < 1e12) {
+          latestSimSecondMs = Math.max(latestSimSecondMs, candidate * 1000);
+        }
+      }
+    }
+
+    latestSimSecondMsRef.current = latestSimSecondMs;
+    return latestSimSecondMs > 0 ? Date.now() - latestSimSecondMs : 0;
+  }, [robots]);
+
+  const toDate = React.useCallback(
+    (ts?: number): Date | null => {
+      if (!ts && ts !== 0) return null;
+      const isMillis = ts > 1e12;
+      const asMs = isMillis ? ts : ts * 1000;
+      return new Date(isMillis ? asMs : asMs + effectiveTimeOffsetMs);
+    },
+    [effectiveTimeOffsetMs],
+  );
+
   const columns: GridColDef[] = [
     {
       field: 'name',
@@ -95,8 +123,12 @@ export function RobotDataGridTable({ onRobotClick, robots }: RobotDataGridTableP
       headerName: 'Est. Task Finish Time',
       width: 150,
       editable: false,
-      valueGetter: (params: GridValueGetterParams) =>
-        params.row.estFinishTime ? new Date(params.row.estFinishTime).toLocaleString() : '-',
+      valueGetter: (params: GridValueGetterParams) => {
+        const ts = params.row.estFinishTime;
+        if (ts === undefined || ts === null) return '-';
+        const d = toDate(ts);
+        return d ? d.toLocaleString() : '-';
+      },
       flex: 1,
       filterable: true,
     },
@@ -123,8 +155,12 @@ export function RobotDataGridTable({ onRobotClick, robots }: RobotDataGridTableP
       headerName: 'Last Updated',
       width: 150,
       editable: false,
-      valueGetter: (params: GridValueGetterParams) =>
-        params.row.lastUpdateTime ? new Date(params.row.lastUpdateTime).toLocaleString() : '-',
+      valueGetter: (params: GridValueGetterParams) => {
+        const ts = params.row.lastUpdateTime;
+        if (ts === undefined || ts === null) return '-';
+        const d = toDate(ts);
+        return d ? d.toLocaleString() : '-';
+      },
       flex: 1,
       filterable: true,
     },

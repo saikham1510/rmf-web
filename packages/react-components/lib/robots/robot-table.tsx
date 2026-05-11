@@ -25,11 +25,31 @@ export interface RobotTableData {
 
 interface RobotRowProps extends RobotTableData {
   onClick: React.MouseEventHandler<HTMLTableRowElement>;
+  timeOffsetMs?: number;
 }
 
 const RobotRow = React.memo(
-  ({ fleet, name, status, battery = 0, estFinishTime, lastUpdateTime, onClick }: RobotRowProps) => {
+  ({
+    fleet,
+    name,
+    status,
+    battery = 0,
+    estFinishTime,
+    lastUpdateTime,
+    onClick,
+    timeOffsetMs = 0,
+  }: RobotRowProps) => {
     const theme = useTheme();
+
+    const toDate = React.useCallback(
+      (ts?: number): Date | null => {
+        if (!ts && ts !== 0) return null;
+        const isMillis = ts > 1e12;
+        const asMs = isMillis ? ts : ts * 1000;
+        return new Date(isMillis ? asMs : asMs + timeOffsetMs);
+      },
+      [timeOffsetMs],
+    );
 
     const robotStatusClass: SxProps = React.useMemo(() => {
       if (!status) {
@@ -68,9 +88,21 @@ const RobotRow = React.memo(
       >
         <TableCell>{fleet}</TableCell>
         <TableCell>{name}</TableCell>
-        <TableCell>{estFinishTime ? new Date(estFinishTime).toLocaleString() : '-'}</TableCell>
+        <TableCell>
+          {(() => {
+            if (estFinishTime === undefined || estFinishTime === null) return '-';
+            const d = toDate(estFinishTime);
+            return d ? d.toLocaleString() : '-';
+          })()}
+        </TableCell>
         <TableCell>{(battery * 100).toFixed(2)}%</TableCell>
-        <TableCell>{lastUpdateTime ? new Date(lastUpdateTime).toLocaleString() : '-'}</TableCell>
+        <TableCell>
+          {(() => {
+            if (lastUpdateTime === undefined || lastUpdateTime === null) return '-';
+            const d = toDate(lastUpdateTime);
+            return d ? d.toLocaleString() : '-';
+          })()}
+        </TableCell>
         <TableCell sx={robotStatusClass}>{status}</TableCell>
       </TableRow>
     );
@@ -87,6 +119,25 @@ export interface RobotTableProps extends TableProps {
 }
 
 export function RobotTable({ robots, onRobotClick, ...otherProps }: RobotTableProps): JSX.Element {
+  // Keep sim "now" aligned with wall-clock "now" while preventing stale fleet
+  // updates from pulling the inferred sim clock backward.
+  const latestSimSecondMsRef = React.useRef<number>(0);
+
+  const effectiveTimeOffsetMs = React.useMemo(() => {
+    let latestSimSecondMs = latestSimSecondMsRef.current;
+
+    for (const r of robots) {
+      const candidateTimes = [r.estFinishTime, r.lastUpdateTime];
+      for (const candidate of candidateTimes) {
+        if (candidate !== undefined && candidate !== null && candidate > 0 && candidate < 1e12) {
+          latestSimSecondMs = Math.max(latestSimSecondMs, candidate * 1000);
+        }
+      }
+    }
+
+    latestSimSecondMsRef.current = latestSimSecondMs;
+    return latestSimSecondMs > 0 ? Date.now() - latestSimSecondMs : 0;
+  }, [robots]);
   return (
     <Table stickyHeader size="small" style={{ tableLayout: 'fixed' }} {...otherProps}>
       <TableHead>
@@ -104,6 +155,7 @@ export function RobotTable({ robots, onRobotClick, ...otherProps }: RobotTablePr
           <RobotRow
             key={robot_id}
             {...robot}
+            timeOffsetMs={effectiveTimeOffsetMs}
             onClick={(ev) => onRobotClick && onRobotClick(ev, robot)}
           />
         ))}

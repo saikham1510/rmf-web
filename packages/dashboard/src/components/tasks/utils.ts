@@ -122,17 +122,20 @@ export const toApiSchedule = (
 
   const apiSchedules: PostScheduledTaskRequest['schedules'] = [];
 
-  const start_from = start.toISOString();
+  // Set start_from to midnight on the picked date (beginning of day in local timezone)
+  const startOfDay = new Date(start);
+  startOfDay.setHours(0, 0, 0, 0);
+  const start_from = startOfDay.toISOString();
   const until = schedule.until?.toISOString();
   const scheduledTaskRequest: TaskRequest = {
     ...taskRequest,
     unix_millis_earliest_start_time: start.valueOf(),
   };
 
-  // Extract hours/minutes from UTC, NOT browser local time
-  const utcHours = start.getUTCHours().toString().padStart(2, '0');
-  const utcMinutes = start.getUTCMinutes().toString().padStart(2, '0');
-  const at = `${utcHours}:${utcMinutes}`;
+  // Extract hours/minutes from local time (user picked time in their timezone)
+  const localHours = start.getHours().toString().padStart(2, '0');
+  const localMinutes = start.getMinutes().toString().padStart(2, '0');
+  const at = `${localHours}:${localMinutes}`;
   schedule.days[0] && apiSchedules.push({ period: 'monday', start_from, at, until });
   schedule.days[1] && apiSchedules.push({ period: 'tuesday', start_from, at, until });
   schedule.days[2] && apiSchedules.push({ period: 'wednesday', start_from, at, until });
