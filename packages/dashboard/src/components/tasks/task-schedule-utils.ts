@@ -20,6 +20,31 @@ import {
 } from 'date-fns';
 import { getShortDescription, RecurringDays, Schedule } from 'react-components';
 
+const DEFAULT_EVENT_DURATION_MINUTES = 45;
+
+const getPlannedEnd = (date: Date, plannedEndAt?: string | null): Date => {
+  if (!plannedEndAt) {
+    return addMinutes(date, DEFAULT_EVENT_DURATION_MINUTES);
+  }
+
+  const [hours, minutes] = plannedEndAt.split(':').map((s: string) => Number(s));
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) {
+    return addMinutes(date, DEFAULT_EVENT_DURATION_MINUTES);
+  }
+
+  const plannedEnd = new Date(date);
+  plannedEnd.setHours(hours);
+  plannedEnd.setMinutes(minutes);
+  plannedEnd.setSeconds(0);
+  plannedEnd.setMilliseconds(0);
+
+  if (plannedEnd <= date) {
+    plannedEnd.setDate(plannedEnd.getDate() + 1);
+  }
+
+  return plannedEnd;
+};
+
 /**
  * Generates a list of ProcessedEvents to occur within the query start and end,
  * based on the provided schedule.
@@ -101,7 +126,7 @@ export const scheduleToEvents = (
       if (!task.except_dates?.includes(curFormatted)) {
         events.push({
           start: cur,
-          end: addMinutes(cur, 45),
+          end: getPlannedEnd(cur, schedule.planned_end_at),
           event_id: getEventId(),
           title: getEventTitle(),
         });
@@ -129,6 +154,12 @@ export const scheduleWithSelectedDay = (scheduleTask: ApiSchedule[], date: Date)
     days: daysArray,
     until: endOfDay(new Date(date.toISOString())),
     at: scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
+    plannedEndAt: scheduleTask[0].planned_end_at
+      ? getPlannedEnd(
+          scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
+          scheduleTask[0].planned_end_at,
+        )
+      : undefined,
   };
 };
 
@@ -151,6 +182,12 @@ export const apiScheduleToSchedule = (scheduleTask: ApiSchedule[]): Schedule => 
     days: daysArray,
     until: scheduleTask[0].until ? new Date(scheduleTask[0].until) : undefined,
     at: scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
+    plannedEndAt: scheduleTask[0].planned_end_at
+      ? getPlannedEnd(
+          scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
+          scheduleTask[0].planned_end_at,
+        )
+      : undefined,
   };
 };
 
