@@ -50,7 +50,12 @@ class ScheduledTaskSchedule(Model):
     until = DatetimeField(null=True)
     period = CharEnumField(Period)
     at = CharField(255, null=True)
-    dispatched = BooleanField(default=False)
+    dispatched = BooleanField(
+        default=False
+    )  # Legacy field, kept for backwards compatibility
+    # NEW FIELD: Tracks when this schedule should next run
+    # Updated after each dispatch to calculate next occurrence
+    next_run_at = DatetimeField(null=True)
 
     def get_id(self) -> int:
         return self._id
