@@ -124,7 +124,16 @@ export const TaskSummary = React.memo((props: TaskSummaryProps) => {
         title: 'Current phase',
         value: taskState ? getTaskPhaseDetails(taskState) : 'Invalid task state.',
       },
-    ];
+    ].concat(
+      taskState?.unix_millis_finish_time
+        ? [
+            {
+              title: 'Finish time',
+              value: new Date(taskState.unix_millis_finish_time).toLocaleString(),
+            },
+          ]
+        : [],
+    );
 
     const theme = useTheme();
 

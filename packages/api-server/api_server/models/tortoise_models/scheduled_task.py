@@ -1,5 +1,8 @@
+from datetime import timezone
 from enum import Enum
 
+import schedule
+from schedule import Job
 from tortoise.fields import (
     BooleanField,
     CharEnumField,
@@ -48,6 +51,7 @@ class ScheduledTaskSchedule(Model):
     every = SmallIntField(null=True)
     start_from = DatetimeField(null=True)
     until = DatetimeField(null=True)
+    planned_end_at = CharField(255, null=True)
     period = CharEnumField(Period)
     at = CharField(255, null=True)
     dispatched = BooleanField(default=False)
@@ -59,7 +63,7 @@ class ScheduledTaskSchedule(Model):
         if self.every is not None:
             job = schedule.every(self.every)
         else:
-            job = schedule.every()
+            job = schedule.every(1)
 
         if self.period in (
             ScheduledTaskSchedule.Period.Monday,

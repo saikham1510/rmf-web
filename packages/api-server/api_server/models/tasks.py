@@ -25,6 +25,7 @@ class ScheduledTaskSchedule(BaseModel):
     every: int | None = None
     start_from: datetime | None = None
     until: datetime | None = None
+    planned_end_at: str | None = None
     period: Period
     at: str | None = None
     dispatched: bool = False

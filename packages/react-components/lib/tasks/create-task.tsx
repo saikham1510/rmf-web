@@ -600,6 +600,7 @@ export interface Schedule {
   days: RecurringDays;
   until?: Date;
   at: Date;
+  plannedEndAt?: Date;
 }
 
 enum ScheduleUntilValue {
@@ -661,6 +662,12 @@ const defaultFavoriteTask = (): TaskFavorite => {
     priority: { type: 'binary', value: 0 },
     user: '',
   };
+};
+
+const defaultPlannedEnd = (startTime: Date): Date => {
+  const plannedEnd = new Date(startTime.valueOf());
+  plannedEnd.setMinutes(plannedEnd.getMinutes() + 45);
+  return plannedEnd;
 };
 
 export interface CreateTaskFormProps
@@ -743,6 +750,7 @@ export function CreateTaskForm({
       days: [true, true, true, true, true, true, true],
       until: undefined,
       at: new Date(),
+      plannedEndAt: defaultPlannedEnd(new Date()),
     },
   );
   const [scheduleUntilValue, setScheduleUntilValue] = React.useState<string>(
@@ -1259,6 +1267,21 @@ export function CreateTaskForm({
                   }
                 }}
                 label="At"
+                disabled={!scheduleEnabled}
+                renderInput={(props) => <TextField {...props} fullWidth />}
+              />
+            </Grid>
+            <Grid item xs={6}>
+              <TimePicker
+                minutesStep={1}
+                value={schedule.plannedEndAt ?? defaultPlannedEnd(schedule.at)}
+                onChange={(date) => {
+                  if (!date) {
+                    return;
+                  }
+                  setSchedule((prev) => ({ ...prev, plannedEndAt: date }));
+                }}
+                label="Planned end"
                 disabled={!scheduleEnabled}
                 renderInput={(props) => <TextField {...props} fullWidth />}
               />
