@@ -1768,6 +1768,12 @@ export interface ScheduledTaskSchedule {
   until?: string | null;
   /**
    *
+   * @type {string}
+   * @memberof ScheduledTaskSchedule
+   */
+  planned_end_at?: string | null;
+  /**
+   *
    * @type {Period}
    * @memberof ScheduledTaskSchedule
    */

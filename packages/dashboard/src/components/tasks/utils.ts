@@ -127,6 +127,12 @@ export const toApiSchedule = (
   startOfDay.setHours(0, 0, 0, 0);
   const start_from = startOfDay.toISOString();
   const until = schedule.until?.toISOString();
+  const planned_end_at = schedule.plannedEndAt
+    ? `${schedule.plannedEndAt.getHours().toString().padStart(2, '0')}:${schedule.plannedEndAt
+        .getMinutes()
+        .toString()
+        .padStart(2, '0')}`
+    : undefined;
   const scheduledTaskRequest: TaskRequest = {
     ...taskRequest,
     unix_millis_earliest_start_time: start.valueOf(),
@@ -136,13 +142,20 @@ export const toApiSchedule = (
   const localHours = start.getHours().toString().padStart(2, '0');
   const localMinutes = start.getMinutes().toString().padStart(2, '0');
   const at = `${localHours}:${localMinutes}`;
-  schedule.days[0] && apiSchedules.push({ period: 'monday', start_from, at, until });
-  schedule.days[1] && apiSchedules.push({ period: 'tuesday', start_from, at, until });
-  schedule.days[2] && apiSchedules.push({ period: 'wednesday', start_from, at, until });
-  schedule.days[3] && apiSchedules.push({ period: 'thursday', start_from, at, until });
-  schedule.days[4] && apiSchedules.push({ period: 'friday', start_from, at, until });
-  schedule.days[5] && apiSchedules.push({ period: 'saturday', start_from, at, until });
-  schedule.days[6] && apiSchedules.push({ period: 'sunday', start_from, at, until });
+  schedule.days[0] &&
+    apiSchedules.push({ period: 'monday', start_from, at, until, planned_end_at });
+  schedule.days[1] &&
+    apiSchedules.push({ period: 'tuesday', start_from, at, until, planned_end_at });
+  schedule.days[2] &&
+    apiSchedules.push({ period: 'wednesday', start_from, at, until, planned_end_at });
+  schedule.days[3] &&
+    apiSchedules.push({ period: 'thursday', start_from, at, until, planned_end_at });
+  schedule.days[4] &&
+    apiSchedules.push({ period: 'friday', start_from, at, until, planned_end_at });
+  schedule.days[5] &&
+    apiSchedules.push({ period: 'saturday', start_from, at, until, planned_end_at });
+  schedule.days[6] &&
+    apiSchedules.push({ period: 'sunday', start_from, at, until, planned_end_at });
   return {
     task_request: scheduledTaskRequest,
     schedules: apiSchedules,

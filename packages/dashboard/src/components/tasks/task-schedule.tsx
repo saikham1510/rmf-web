@@ -130,7 +130,7 @@ export const TaskSchedule = () => {
         confirmText={'Ok'}
         cancelText="Cancel"
         open={true}
-        title={'Edit recurring task'}
+        title={'Edit scheduled patrol'}
         submitting={undefined}
         onClose={() => {
           scheduler.close();
@@ -316,7 +316,7 @@ export const TaskSchedule = () => {
           confirmText={'Ok'}
           cancelText="Cancel"
           open={openDeleteScheduleDialog}
-          title={'Delete recurring event'}
+          title={'Delete scheduled patrol'}
           submitting={undefined}
           onClose={() => {
             setOpenDeleteScheduleDialog(false);
