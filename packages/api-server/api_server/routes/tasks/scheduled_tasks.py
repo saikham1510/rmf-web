@@ -5,6 +5,7 @@ import time as pytime
 from datetime import datetime, timezone
 from typing import Optional
 
+import schedule
 import tortoise.transactions
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -266,33 +267,32 @@ async def post_scheduled_task(
     # Validate schedules BEFORE entering transaction to avoid rollback on validation failure
     validate_schedules(scheduled_task_request.schedules)
 
-    try:
-        async with tortoise.transactions.in_transaction():
-            scheduled_task = await ttm.ScheduledTask.create(
-                task_request=scheduled_task_request.task_request.model_dump(
-                    exclude_none=True
-                ),
-                created_by=user.username,
+    async with tortoise.transactions.in_transaction():
+        scheduled_task = await ttm.ScheduledTask.create(
+            task_request=scheduled_task_request.task_request.model_dump(
+                exclude_none=True
+            ),
+            created_by=user.username,
+        )
+        schedules = [
+            ttm.ScheduledTaskSchedule(
+                scheduled_task=scheduled_task,
+                start_from=normalize_to_utc(schedule_request.start_from),
+                until=normalize_to_utc(schedule_request.until),
+                at=schedule_request.at,
+                every=schedule_request.every,
+                period=schedule_request.period,
+                dispatched=False,
             )
-            schedules = [
-                ttm.ScheduledTaskSchedule(
-                    scheduled_task=scheduled_task,
-                    start_from=normalize_to_utc(schedule_request.start_from),
-                    until=normalize_to_utc(schedule_request.until),
-                    at=schedule_request.at,
-                    every=schedule_request.every,
-                    period=schedule_request.period,
-                    dispatched=False,
-                )
-            )
+        ]
 
-            await schedule_task(scheduled_task, task_repo)
-        scheduled_task = await ttm.ScheduledTask.get_or_none(
-            id=scheduled_task.id
-        ).prefetch_related("schedules")
-        if scheduled_task is None:
-            raise HTTPException(500)
-        return ScheduledTask.model_validate(scheduled_task)
+        await schedule_task(scheduled_task, task_repo)
+    scheduled_task = await ttm.ScheduledTask.get_or_none(
+        id=scheduled_task.id
+    ).prefetch_related("schedules")
+    if scheduled_task is None:
+        raise HTTPException(500)
+    return ScheduledTask.model_validate(scheduled_task)
 
 
 @router.get("", response_model=list[ScheduledTask])
@@ -356,31 +356,30 @@ async def update_schedule_task(
     scheduled_task_request: PostScheduledTaskRequest,
     except_date: Optional[datetime] = None,
 ):
-    try:
-        task = await get_scheduled_task(task_id)
-        if task is None:
-            raise HTTPException(404)
-        # If "except_date" is provided, it means a single event is being updated.
-        # In this case, we perform the following steps:
-        #   1. Add the "except_date" to the list of exception dates for the task.
-        #   2. Clear all existing schedules associated with the task.
-        #   3. Create a new scheduled task with the requested data from the schedule form.
+    task = await get_scheduled_task(task_id)
+    if task is None:
+        raise HTTPException(404)
+    # If "except_date" is provided, it means a single event is being updated.
+    # In this case, we perform the following steps:
+    #   1. Add the "except_date" to the list of exception dates for the task.
+    #   2. Clear all existing schedules associated with the task.
+    #   3. Create a new scheduled task with the requested data from the schedule form.
 
-        async with tortoise.transactions.in_transaction():
-            if except_date:
-                event_date_str = normalize_to_utc(except_date).isoformat()
-                if task.except_dates is None:
-                    task.except_dates = []
-                if not isinstance(task.except_dates, list):
-                    logger.error(
-                        f"task.except_dates is not a list: {type(task.except_dates)}"
-                    )
-                    raise HTTPException(500)
-                task.except_dates.append(event_date_str[:10])
-                await task.save()
+    async with tortoise.transactions.in_transaction():
+        if except_date:
+            event_date_str = normalize_to_utc(except_date).isoformat()
+            if task.except_dates is None:
+                task.except_dates = []
+            if not isinstance(task.except_dates, list):
+                logger.error(
+                    f"task.except_dates is not a list: {type(task.except_dates)}"
+                )
+                raise HTTPException(500)
+            task.except_dates.append(event_date_str[:10])
+            await task.save()
 
-                for sche in task.schedules:
-                    schedule.clear(sche.get_id())
+            for sche in task.schedules:
+                schedule.clear(sche.get_id())
 
     if len(scheduled_task_request.schedules) == 0:
         raise HTTPException(422, "Task is never going to run")

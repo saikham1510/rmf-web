@@ -1,5 +1,8 @@
+from datetime import timezone
 from enum import Enum
+from typing import TYPE_CHECKING
 
+import schedule
 from tortoise.fields import (
     BooleanField,
     CharEnumField,
@@ -60,7 +63,7 @@ class ScheduledTaskSchedule(Model):
     def get_id(self) -> int:
         return self._id
 
-    def to_job(self) -> Job:
+    def to_job(self) -> schedule.Job:
         if self.every is not None:
             job = schedule.every(self.every)
         else:
