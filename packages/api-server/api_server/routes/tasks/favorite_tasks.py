@@ -31,12 +31,11 @@ async def post_favorite_task(
     user: User = Depends(user_dep),
 ):
     try:
+        # Store epoch milliseconds consistently as integer in DB
         await ttm.TaskFavorite.update_or_create(
             {
                 "name": request.name,
-                "unix_millis_earliest_start_time": datetime.fromtimestamp(
-                    request.unix_millis_earliest_start_time / 1000
-                ),
+                "unix_millis_earliest_start_time": request.unix_millis_earliest_start_time,
                 "priority": request.priority if request.priority else None,
                 "category": request.category,
                 "description": request.description if request.description else None,
@@ -68,10 +67,10 @@ async def get_favorites_tasks(
             TaskFavoritePydantic(
                 id=favorite_task.id,
                 name=favorite_task.name,
-                unix_millis_earliest_start_time=int(
-                    favorite_task.unix_millis_earliest_start_time.strftime(
-                        "%Y%m%d%H%M%S"
-                    )
+                unix_millis_earliest_start_time=(
+                    int(favorite_task.unix_millis_earliest_start_time)
+                    if favorite_task.unix_millis_earliest_start_time is not None
+                    else 0
                 ),
                 priority=favorite_task.priority if favorite_task.priority else None,
                 category=favorite_task.category,
