@@ -229,7 +229,7 @@ function DeliveryTaskForm({
         <TextField
           id="pickup_sku"
           fullWidth
-          label="Pickup Item"
+          label="Pickup SKU"
           value={taskDesc.pickup.payload.sku}
           required
           onChange={(ev) => {
@@ -305,7 +305,7 @@ function DeliveryTaskForm({
         <TextField
           id="dropoff_sku"
           fullWidth
-          label="Dropoff Item"
+          label="Dropoff SKU"
           value={taskDesc.dropoff.payload.sku}
           required
           onChange={(ev) => {
@@ -663,13 +663,14 @@ export interface CreateTaskFormProps
    * Shows extra UI elements suitable for submittng batched tasks. Default to 'false'.
    */
   user: string;
-  showScheduleButton?: boolean;
   allowBatch?: boolean;
+  showFavorite?: boolean;
   cleaningZones?: string[];
   patrolWaypoints?: string[];
   pickupPoints?: Record<string, string>;
   dropoffPoints?: Record<string, string>;
   favoritesTasks?: TaskFavorite[];
+  mode?: 'immediate' | 'full';
   scheduleToEdit?: Schedule;
   requestTask?: TaskRequest;
   submitTasks?(tasks: TaskRequest[], schedule: Schedule | null): Promise<void>;
@@ -686,14 +687,15 @@ export interface CreateTaskFormProps
 
 export function CreateTaskForm({
   user,
-  showScheduleButton = true,
   cleaningZones = [],
   patrolWaypoints = [],
   pickupPoints = {},
   dropoffPoints = {},
   favoritesTasks = [],
+  mode = 'full',
   scheduleToEdit,
   requestTask,
+  showFavorite = false,
   submitTasks,
   tasksFromFile,
   onClose,
@@ -708,6 +710,13 @@ export function CreateTaskForm({
   ...otherProps
 }: CreateTaskFormProps): JSX.Element {
   const theme = useTheme();
+  const immediateMode = mode === 'immediate';
+  const defaultSchedule: Schedule = {
+    startOn: new Date(),
+    days: [true, true, true, true, true, true, true],
+    until: undefined,
+    at: new Date(),
+  };
 
   const [openFavoriteDialog, setOpenFavoriteDialog] = React.useState(false);
   const [callToDeleteFavoriteTask, setCallToDeleteFavoriteTask] = React.useState(false);
@@ -732,16 +741,14 @@ export function CreateTaskForm({
   const taskRequest = taskRequests[selectedTaskIdx];
   const [openSchedulingDialog, setOpenSchedulingDialog] = React.useState(false);
   const [schedule, setSchedule] = React.useState<Schedule>(
-    scheduleToEdit ?? {
-      startOn: new Date(),
-      days: [true, true, true, true, true, true, true],
-      until: undefined,
-      at: new Date(),
-      plannedEndAt: defaultPlannedEnd(new Date()),
-    },
+    immediateMode ? defaultSchedule : scheduleToEdit ?? defaultSchedule,
   );
   const [scheduleUntilValue, setScheduleUntilValue] = React.useState<string>(
-    scheduleToEdit?.until ? ScheduleUntilValue.ON : ScheduleUntilValue.NEVER,
+    immediateMode
+      ? ScheduleUntilValue.NEVER
+      : scheduleToEdit?.until
+        ? ScheduleUntilValue.ON
+        : ScheduleUntilValue.NEVER,
   );
 
   const handleScheduleUntilValue = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -760,10 +767,8 @@ export function CreateTaskForm({
     setScheduleUntilValue(event.target.value);
   };
   // schedule is not supported with batch upload
-  const scheduleEnabled = taskRequests.length === 1;
-  const scheduleSupportedCategory =
-    taskRequest.category === 'clean' || taskRequest.category === 'patrol';
-  const startTimeEnabled = taskRequest.category === 'clean' || taskRequest.category === 'patrol';
+  const scheduleEnabled = !immediateMode && taskRequests.length === 1;
+  const startTimeEnabled = !immediateMode && taskRequest.category === 'clean';
 
   const updateTasks = () => {
     setTaskRequests((prev) => {
@@ -825,7 +830,7 @@ export function CreateTaskForm({
     }
     taskRequest.description = newDesc;
     taskRequest.category = newCategory;
-    if (newCategory === 'delivery') {
+    if (newCategory !== 'clean') {
       taskRequest.unix_millis_earliest_start_time = 0;
     }
 
@@ -834,7 +839,7 @@ export function CreateTaskForm({
       category: newCategory,
       description: newDesc,
       unix_millis_earliest_start_time:
-        newCategory === 'delivery' ? 0 : favoriteTaskBuffer.unix_millis_earliest_start_time,
+        newCategory === 'clean' ? favoriteTaskBuffer.unix_millis_earliest_start_time : 0,
     });
 
     updateTasks();
@@ -852,12 +857,12 @@ export function CreateTaskForm({
     for (const t of taskRequests) {
       t.requester = requester;
       t.unix_millis_request_time = Date.now();
-      if (t.category === 'delivery') {
+      if (t.category !== 'clean') {
         t.unix_millis_earliest_start_time = 0;
       }
     }
 
-    const submittingSchedule = scheduling && scheduleEnabled;
+    const submittingSchedule = !immediateMode && scheduling && scheduleEnabled;
     try {
       setSubmitting(true);
       await submitTasks(taskRequests, submittingSchedule ? schedule : null);
@@ -979,41 +984,44 @@ export function CreateTaskForm({
           </DialogTitle>
           <DialogContent>
             <Grid container direction="row" wrap="nowrap">
-              <List dense className={classes.taskList} aria-label="Favorites Tasks">
-                <Typography variant="h6" component="div">
-                  Favorite tasks
-                </Typography>
-                {favoritesTasks.map((favoriteTask, index) => {
-                  return (
-                    <FavoriteTask
-                      listItemText={favoriteTask.name}
-                      key={index}
-                      setFavoriteTask={setFavoriteTaskBuffer}
-                      favoriteTask={favoriteTask}
-                      setCallToDelete={setCallToDeleteFavoriteTask}
-                      setCallToUpdate={setCallToUpdateFavoriteTask}
-                      setOpenDialog={setOpenFavoriteDialog}
-                      listItemClick={() => {
-                        setFavoriteTaskBuffer(favoriteTask);
-                        setTaskRequests([
-                          {
-                            category: favoriteTask.category,
-                            description: favoriteTask.description,
-                            unix_millis_earliest_start_time: Date.now(),
-                            priority: favoriteTask.priority,
-                          },
-                        ]);
-                      }}
-                    />
-                  );
-                })}
-              </List>
-
-              <Divider
-                orientation="vertical"
-                flexItem
-                style={{ marginLeft: theme.spacing(2), marginRight: theme.spacing(2) }}
-              />
+              {showFavorite && (
+                <List dense className={classes.taskList} aria-label="Favorites Tasks">
+                  <Typography variant="h6" component="div">
+                    Favorite tasks
+                  </Typography>
+                  {favoritesTasks.map((favoriteTask, index) => {
+                    return (
+                      <FavoriteTask
+                        listItemText={favoriteTask.name}
+                        key={index}
+                        setFavoriteTask={setFavoriteTaskBuffer}
+                        favoriteTask={favoriteTask}
+                        setCallToDelete={setCallToDeleteFavoriteTask}
+                        setCallToUpdate={setCallToUpdateFavoriteTask}
+                        setOpenDialog={setOpenFavoriteDialog}
+                        listItemClick={() => {
+                          setFavoriteTaskBuffer(favoriteTask);
+                          setTaskRequests([
+                            {
+                              category: favoriteTask.category,
+                              description: favoriteTask.description,
+                              unix_millis_earliest_start_time: Date.now(),
+                              priority: favoriteTask.priority,
+                            },
+                          ]);
+                        }}
+                      />
+                    );
+                  })}
+                </List>
+              )}
+              {showFavorite && (
+                <Divider
+                  orientation="vertical"
+                  flexItem
+                  style={{ marginLeft: theme.spacing(2), marginRight: theme.spacing(2) }}
+                />
+              )}
 
               <Grid>
                 <Grid container spacing={theme.spacing(2)}>
@@ -1149,11 +1157,11 @@ export function CreateTaskForm({
             >
               Cancel
             </Button>
-            {showScheduleButton && (
+            {!immediateMode && (
               <Button
                 variant="contained"
                 color="primary"
-                disabled={submitting || !formFullyFilled || !scheduleSupportedCategory}
+                disabled={submitting || !formFullyFilled}
                 className={classes.actionBtn}
                 onClick={() => setOpenSchedulingDialog(true)}
               >
@@ -1164,7 +1172,9 @@ export function CreateTaskForm({
               variant="contained"
               type="submit"
               color="primary"
-              disabled={submitting || !formFullyFilled || scheduleToEdit !== undefined}
+              disabled={
+                submitting || !formFullyFilled || (!immediateMode && scheduleToEdit !== undefined)
+              }
               className={classes.actionBtn}
               aria-label={submitText}
               onClick={handleSubmitNow}
@@ -1205,7 +1215,7 @@ export function CreateTaskForm({
           )}
         </ConfirmationDialog>
       )}
-      {openSchedulingDialog && (
+      {!immediateMode && openSchedulingDialog && (
         <ConfirmationDialog
           confirmText="Schedule"
           cancelText="Cancel"

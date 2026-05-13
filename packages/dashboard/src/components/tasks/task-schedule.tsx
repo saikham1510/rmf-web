@@ -6,7 +6,12 @@ import {
   SchedulerProps,
 } from '@aldabil/react-scheduler/types';
 import { Button } from '@mui/material';
-import { ScheduledTask, ScheduledTaskSchedule as ApiSchedule } from 'api-client';
+import {
+  ScheduledTask,
+  ScheduledTaskSchedule as ApiSchedule,
+  TaskFavoritePydantic as TaskFavorite,
+  TaskRequest,
+} from 'api-client';
 import React from 'react';
 import {
   ConfirmationDialog,
@@ -20,7 +25,7 @@ import useGetUsername from '../../hooks/useFetchUser';
 import { AppControllerContext } from '../app-contexts';
 import { AppEvents } from '../app-events';
 import { RmfAppContext } from '../rmf-app';
-import { toApiSchedule } from './utils';
+import { parseTasksFile, toApiSchedule } from './utils';
 import {
   apiScheduleToSchedule,
   getScheduledTaskTitle,
@@ -75,12 +80,9 @@ export const TaskSchedule = () => {
   const [calendarEvents, setCalendarEvents] = React.useState<ProcessedEvent[]>([]);
   const [openDeleteScheduleDialog, setOpenDeleteScheduleDialog] = React.useState(false);
   const [openCreateTaskForm, setOpenCreateTaskForm] = React.useState(false);
-  const [scheduleToEdit, setScheduleToEdit] = React.useState<Schedule>({
-    startOn: new Date(),
-    days: [false, false, false, false, false, false, false],
-    until: undefined,
-    at: new Date(),
-  });
+  const [scheduleToEdit, setScheduleToEdit] = React.useState<Schedule | undefined>(undefined);
+  const [favoritesTasks, setFavoritesTasks] = React.useState<TaskFavorite[]>([]);
+  const [isEditingSchedule, setIsEditingSchedule] = React.useState(false);
 
   React.useEffect(() => {
     const sub = AppEvents.refreshTaskApp.subscribe({
@@ -90,6 +92,21 @@ export const TaskSchedule = () => {
     });
     return () => sub.unsubscribe();
   }, []);
+
+  React.useEffect(() => {
+    if (!rmf) {
+      return;
+    }
+
+    (async () => {
+      const resp = await rmf.tasksApi.getFavoritesTasksFavoriteTasksGet();
+      setFavoritesTasks(resp.data as TaskFavorite[]);
+    })();
+
+    return () => {
+      setFavoritesTasks([]);
+    };
+  }, [rmf, refreshTaskAppCount]);
 
   const eventsMap = React.useRef<Record<number, ScheduledTask>>({});
   const getRemoteEvents = React.useCallback<NonNullable<SchedulerProps['getRemoteEvents']>>(
@@ -138,16 +155,17 @@ export const TaskSchedule = () => {
           AppEvents.refreshTaskApp.next();
         }}
         onSubmit={() => {
-          setOpenCreateTaskForm(true);
           const task = eventsMap.current[Number(currentEventIdRef.current)];
           if (!task) {
             throw new Error(`unable to find task for event ${currentEventIdRef.current}`);
           }
+          setIsEditingSchedule(true);
           setCurrentScheduledTask(task);
           setScheduleToEdit(apiScheduleToSchedule(task.schedules));
           if (eventScope === EventScopes.CURRENT) {
             setScheduleToEdit(scheduleWithSelectedDay(task.schedules, exceptDateRef.current));
           }
+          setOpenCreateTaskForm(true);
           AppEvents.refreshTaskApp.next();
           scheduler.close();
         }}
@@ -168,32 +186,106 @@ export const TaskSchedule = () => {
         throw new Error('tasks api not available');
       }
 
-      if (!schedule || !currentScheduleTask) {
-        throw new Error('No schedule or task selected for submission.');
+      if (!schedule) {
+        await Promise.all(
+          taskRequests.map((request) =>
+            rmf.tasksApi.postDispatchTaskTasksDispatchTaskPost({
+              type: 'dispatch_task_request',
+              request,
+            }),
+          ),
+        );
+        AppEvents.refreshTaskApp.next();
+        return;
       }
 
       const scheduleRequests = taskRequests.map((req) => toApiSchedule(req, schedule));
 
-      let exceptDate: string | undefined = undefined;
-      if (eventScope === EventScopes.CURRENT) {
-        exceptDate = exceptDateRef.current.toISOString();
-      }
+      if (isEditingSchedule && currentScheduleTask) {
+        // Editing existing schedule
+        let exceptDate: string | undefined = undefined;
+        if (eventScope === EventScopes.CURRENT) {
+          exceptDate = exceptDateRef.current.toISOString();
+        }
 
-      await Promise.all(
-        scheduleRequests.map((req) =>
-          rmf.tasksApi.updateScheduleTaskScheduledTasksTaskIdUpdatePost(
-            currentScheduleTask.id,
-            req,
-            exceptDate,
+        await Promise.all(
+          scheduleRequests.map((req) =>
+            rmf.tasksApi.updateScheduleTaskScheduledTasksTaskIdUpdatePost(
+              currentScheduleTask.id,
+              req,
+              exceptDate,
+            ),
           ),
-        ),
-      );
+        );
+      } else {
+        // Creating new schedule
+        await Promise.all(
+          scheduleRequests.map((req) => rmf.tasksApi.postScheduledTaskScheduledTasksPost(req)),
+        );
+      }
 
       setEventScope(EventScopes.CURRENT);
       AppEvents.refreshTaskApp.next();
     },
-    [rmf, currentScheduleTask, eventScope],
+    [rmf, isEditingSchedule, currentScheduleTask, eventScope],
   );
+
+  const submitFavoriteTask = React.useCallback<Required<CreateTaskFormProps>['submitFavoriteTask']>(
+    async (taskFavoriteRequest) => {
+      if (!rmf) {
+        throw new Error('tasks api not available');
+      }
+      await rmf.tasksApi.postFavoriteTaskFavoriteTasksPost(taskFavoriteRequest);
+      AppEvents.refreshTaskApp.next();
+    },
+    [rmf],
+  );
+
+  const deleteFavoriteTask = React.useCallback<Required<CreateTaskFormProps>['deleteFavoriteTask']>(
+    async (favoriteTask) => {
+      if (!rmf) {
+        throw new Error('tasks api not available');
+      }
+      if (!favoriteTask.id) {
+        throw new Error('Id is needed');
+      }
+      await rmf.tasksApi.deleteFavoriteTaskFavoriteTasksFavoriteTaskIdDelete(favoriteTask.id);
+      AppEvents.refreshTaskApp.next();
+    },
+    [rmf],
+  );
+
+  const uploadFileInputRef = React.useRef<HTMLInputElement>(null);
+  const tasksFromFile = React.useCallback((): Promise<TaskRequest[]> => {
+    return new Promise((res) => {
+      const fileInputEl = uploadFileInputRef.current;
+      if (!fileInputEl) {
+        return res([]);
+      }
+
+      let taskFiles: TaskRequest[];
+      const listener = async () => {
+        try {
+          if (!fileInputEl.files || fileInputEl.files.length === 0) {
+            return res([]);
+          }
+          try {
+            taskFiles = parseTasksFile(await fileInputEl.files[0].text());
+          } catch (err) {
+            showAlert('error', (err as Error).message, 5000);
+            return res([]);
+          }
+          return res(taskFiles);
+        } finally {
+          fileInputEl.removeEventListener('input', listener);
+          fileInputEl.value = '';
+        }
+      };
+
+      fileInputEl.addEventListener('input', listener);
+      fileInputEl.click();
+    });
+  }, [showAlert]);
 
   const handleSubmitDeleteSchedule: React.MouseEventHandler = async (ev) => {
     ev.preventDefault();
@@ -229,8 +321,29 @@ export const TaskSchedule = () => {
 
   return (
     <>
+      <Button
+        variant="contained"
+        sx={{ mb: 2 }}
+        onClick={() => {
+          setIsEditingSchedule(false);
+          setCurrentScheduledTask(undefined);
+          setScheduleToEdit(undefined);
+          setOpenCreateTaskForm(true);
+        }}
+      >
+        Add Schedule
+      </Button>
+
+      <input
+        ref={uploadFileInputRef}
+        type="file"
+        accept="application/json"
+        style={{ display: 'none' }}
+      />
+
       <Scheduler
         // react-scheduler does not support refreshing, workaround by mounting a new instance.
+
         key={`scheduler-${refreshTaskAppCount}`}
         view="week"
         month={{
@@ -286,24 +399,41 @@ export const TaskSchedule = () => {
           cleaningZones={cleaningZoneNames}
           pickupPoints={pickupPoints}
           dropoffPoints={dropoffPoints}
-          open={openCreateTaskForm}
+          favoritesTasks={favoritesTasks}
           scheduleToEdit={scheduleToEdit}
-          requestTask={currentScheduleTask?.task_request}
+          requestTask={isEditingSchedule ? currentScheduleTask?.task_request : undefined}
+          open={openCreateTaskForm}
           onClose={() => {
             setOpenCreateTaskForm(false);
-            setEventScope(EventScopes.CURRENT);
-            AppEvents.refreshTaskApp.next();
+            setIsEditingSchedule(false);
+            setCurrentScheduledTask(undefined);
+            setScheduleToEdit(undefined);
           }}
           submitTasks={submitTasks}
+          submitFavoriteTask={submitFavoriteTask}
+          deleteFavoriteTask={deleteFavoriteTask}
+          tasksFromFile={tasksFromFile}
           onSuccess={() => {
             setOpenCreateTaskForm(false);
+            setIsEditingSchedule(false);
+            setCurrentScheduledTask(undefined);
+            setScheduleToEdit(undefined);
             showAlert('success', 'Successfully created task');
           }}
           onFail={(e) => {
             showAlert('error', `Failed to create task: ${e.message}`);
           }}
+          onSuccessFavoriteTask={(message) => {
+            showAlert('success', message);
+          }}
+          onFailFavoriteTask={(e) => {
+            showAlert('error', `Failed to create or delete favorite task: ${e.message}`);
+          }}
           onSuccessScheduling={() => {
             setOpenCreateTaskForm(false);
+            setIsEditingSchedule(false);
+            setCurrentScheduledTask(undefined);
+            setScheduleToEdit(undefined);
             showAlert('success', 'Successfully created schedule');
           }}
           onFailScheduling={(e) => {

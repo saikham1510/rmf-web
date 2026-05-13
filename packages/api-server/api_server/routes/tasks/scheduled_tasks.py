@@ -519,8 +519,8 @@ async def update_schedule_task(
                 task.except_dates.append(event_date_str[:10])
                 await task.save()
 
-                for sche in task.schedules:
-                    schedule.clear(sche.get_id())
+            for sche in task.schedules:
+                schedule.clear(sche.get_id())
 
                 scheduled_task = await ttm.ScheduledTask.create(
                     task_request=scheduled_task_request.task_request.model_dump_json(

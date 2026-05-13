@@ -31,7 +31,19 @@ from .models import (
     LiftState,
 )
 from .models import tortoise_models as ttm
-from .rmf_io import HealthWatchdog, RmfBookKeeper, rmf_events
+
+# Import rmf_io modules with fallback for missing ROS dependencies
+try:
+    from .rmf_io import HealthWatchdog, RmfBookKeeper, rmf_events
+
+    HAS_RMF_IO = True
+except (ImportError, AttributeError):
+    print("WARNING: RMF IO modules not available. Running in degraded mode.")
+    HealthWatchdog = None  # type: ignore
+    RmfBookKeeper = None  # type: ignore
+    rmf_events = None  # type: ignore
+    HAS_RMF_IO = False
+
 from .types import is_coroutine
 
 
@@ -104,19 +116,24 @@ async def lifespan(_app: FastIO):
 
     # Order is important here
     # 1. load states from db, this populate the sio/fast_io rooms with the latest data
-    await _load_states()
+    if HAS_RMF_IO:
+        await _load_states()
 
-    # 2. start the services after loading states so that the loaded states are not
-    # used. Failing to do so will cause for example, book keeper to save the loaded states
-    # back into the db and mess up health watchdog's heartbeat system.
+        # 2. start the services after loading states so that the loaded states are not
+        # used. Failing to do so will cause for example, book keeper to save the loaded states
+        # back into the db and mess up health watchdog's heartbeat system.
 
-    await rmf_bookkeeper.start()
-    shutdown_cbs.append(rmf_bookkeeper.stop())
-    health_watchdog = HealthWatchdog(
-        rmf_events,
-        logger=logger.getChild("HealthWatchdog"),
-    )
-    await health_watchdog.start()
+        await rmf_bookkeeper.start()
+        shutdown_cbs.append(rmf_bookkeeper.stop())
+        health_watchdog = HealthWatchdog(
+            rmf_events,
+            logger=logger.getChild("HealthWatchdog"),
+        )
+        await health_watchdog.start()
+    else:
+        logger.warning(
+            "RMF IO disabled - health watchdog and book keeper not available"
+        )
 
     if getattr(app_config, "execute_schedules", True):
         logger.info("starting UTC scheduler loop")
@@ -168,50 +185,75 @@ app.mount(
     name="cache",
 )
 
-rmf_bookkeeper = RmfBookKeeper(rmf_events, logger=logger.getChild("BookKeeper"))
+# Only initialize rmf_bookkeeper if RMF IO is available
+if HAS_RMF_IO:
+    rmf_bookkeeper = RmfBookKeeper(rmf_events, logger=logger.getChild("BookKeeper"))
+else:
+    rmf_bookkeeper = None
 
-app.include_router(routes.main_router)
-app.include_router(
-    routes.alerts_router, prefix="/alerts", dependencies=[Depends(user_dep)]
-)
-app.include_router(
-    routes.beacons_router, prefix="/beacons", dependencies=[Depends(user_dep)]
-)
-app.include_router(
-    routes.building_map_router, prefix="/building_map", dependencies=[Depends(user_dep)]
-)
-app.include_router(
-    routes.doors_router, prefix="/doors", dependencies=[Depends(user_dep)]
-)
-app.include_router(
-    routes.lifts_router, prefix="/lifts", dependencies=[Depends(user_dep)]
-)
-app.include_router(
-    routes.tasks_router, prefix="/tasks", dependencies=[Depends(user_dep)]
-)
-app.include_router(
-    routes.scheduled_tasks.router,
-    prefix="/scheduled_tasks",
-    dependencies=[Depends(user_dep)],
-)
-app.include_router(
-    routes.favorite_tasks_router,
-    prefix="/favorite_tasks",
-    dependencies=[Depends(user_dep)],
-)
-app.include_router(
-    routes.dispensers_router, prefix="/dispensers", dependencies=[Depends(user_dep)]
-)
-app.include_router(
-    routes.ingestors_router, prefix="/ingestors", dependencies=[Depends(user_dep)]
-)
-app.include_router(
-    routes.fleets_router, prefix="/fleets", dependencies=[Depends(user_dep)]
-)
-app.include_router(
-    routes.admin_router, prefix="/admin", dependencies=[Depends(user_dep)]
-)
-app.include_router(routes.internal_router, prefix="/_internal")
+# Include routers only if they're not None
+if routes.main_router is not None:
+    app.include_router(routes.main_router)
+if routes.alerts_router is not None:
+    app.include_router(
+        routes.alerts_router, prefix="/alerts", dependencies=[Depends(user_dep)]
+    )
+if routes.beacons_router is not None:
+    app.include_router(
+        routes.beacons_router, prefix="/beacons", dependencies=[Depends(user_dep)]
+    )
+if routes.building_map_router is not None:
+    app.include_router(
+        routes.building_map_router,
+        prefix="/building_map",
+        dependencies=[Depends(user_dep)],
+    )
+if routes.doors_router is not None:
+    app.include_router(
+        routes.doors_router, prefix="/doors", dependencies=[Depends(user_dep)]
+    )
+if routes.lifts_router is not None:
+    app.include_router(
+        routes.lifts_router, prefix="/lifts", dependencies=[Depends(user_dep)]
+    )
+if routes.tasks_router is not None:
+    app.include_router(
+        routes.tasks_router, prefix="/tasks", dependencies=[Depends(user_dep)]
+    )
+if (
+    hasattr(routes, "scheduled_tasks")
+    and routes.scheduled_tasks is not None
+    and hasattr(routes.scheduled_tasks, "router")
+):
+    app.include_router(
+        routes.scheduled_tasks.router,
+        prefix="/scheduled_tasks",
+        dependencies=[Depends(user_dep)],
+    )
+if routes.favorite_tasks_router is not None:
+    app.include_router(
+        routes.favorite_tasks_router,
+        prefix="/favorite_tasks",
+        dependencies=[Depends(user_dep)],
+    )
+if routes.dispensers_router is not None:
+    app.include_router(
+        routes.dispensers_router, prefix="/dispensers", dependencies=[Depends(user_dep)]
+    )
+if routes.ingestors_router is not None:
+    app.include_router(
+        routes.ingestors_router, prefix="/ingestors", dependencies=[Depends(user_dep)]
+    )
+if routes.fleets_router is not None:
+    app.include_router(
+        routes.fleets_router, prefix="/fleets", dependencies=[Depends(user_dep)]
+    )
+if routes.admin_router is not None:
+    app.include_router(
+        routes.admin_router, prefix="/admin", dependencies=[Depends(user_dep)]
+    )
+if routes.internal_router is not None:
+    app.include_router(routes.internal_router, prefix="/_internal")
 
 
 @app.get("/docs", include_in_schema=False)
