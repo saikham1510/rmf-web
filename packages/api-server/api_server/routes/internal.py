@@ -1,18 +1,36 @@
 # NOTE: This will eventually replace `gateway.py``
+import json
+import os
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from api_server import models as mdl
 from api_server.logger import logger as base_logger
+from api_server.models import tortoise_models as ttm
 from api_server.repositories import AlertRepository, FleetRepository, TaskRepository
 from api_server.rmf_io import alert_events, fleet_events, task_events
+from api_server.utils.schedule_utils import (
+    _occurrence_allowed as _sched_occurrence_allowed,
+)
+from api_server.utils.schedule_utils import (
+    should_skip_due_to_planned_end as _sched_skip_due_to_planned_end,
+)
+from api_server.utils.time_utils import now_wall_millis
+
+from .tasks.tasks import post_dispatch_task
 
 router = APIRouter(tags=["_internal"])
 logger = base_logger.getChild("RmfGatewayApp")
 user: mdl.User = mdl.User(username="__rmf_internal__", is_admin=True)
 task_repo = TaskRepository(user)
 alert_repo = AlertRepository(user, task_repo)
+CHAIN_PATROLS = os.getenv("RMF_CHAIN_SCHEDULED_PATROLS", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 def log_phase_has_error(phase: mdl.Phases) -> bool:
@@ -66,6 +84,126 @@ async def process_msg(msg: Dict[str, Any], fleet_repo: FleetRepository) -> None:
             alert = await alert_repo.create_alert(task_state.booking.id, "task")
             if alert is not None:
                 alert_events.alerts.on_next(alert)
+
+            # Optional chaining: Immediately enqueue the next single-loop patrol
+            # if this task was dispatched from a scheduled patrol and the
+            # schedule window is still open.
+            if CHAIN_PATROLS:
+                try:
+                    labels = task_state.booking.labels or []
+                    # Fallback: if RMF did not echo labels into booking, use the
+                    # stored request (saved when we dispatched the task).
+                    if not labels:
+                        try:
+                            req = await task_repo.get_task_request(
+                                task_state.booking.id
+                            )
+                            if req and req.labels:
+                                labels = req.labels
+                        except Exception:
+                            logger.exception(
+                                "chain: failed to load saved task request for labels"
+                            )
+                    sched_label = next(
+                        (
+                            x
+                            for x in labels
+                            if isinstance(x, str)
+                            and x.startswith("scheduled_schedule_id:")
+                        ),
+                        None,
+                    )
+                    if sched_label:
+                        _, _, id_str = sched_label.partition(":")
+                        schedule_id = int(id_str)
+                        schedule_row = await ttm.ScheduledTaskSchedule.get_or_none(
+                            _id=schedule_id
+                        ).select_related("scheduled_task")
+                        if schedule_row and schedule_row.scheduled_task:
+                            now_utc = datetime.now(timezone.utc)
+
+                            # Stop if we're past the window.
+                            if _sched_skip_due_to_planned_end(schedule_row, now_utc):
+                                logger.info(
+                                    "chain: schedule_id=%s stop due to planned_end_at=%s",
+                                    schedule_id,
+                                    schedule_row.planned_end_at,
+                                )
+                            elif not _sched_occurrence_allowed(
+                                schedule_row, now_utc, schedule_row.scheduled_task
+                            ):
+                                logger.info(
+                                    "chain: schedule_id=%s stop due to bounds (until/except_dates)",
+                                    schedule_id,
+                                )
+                            else:
+                                # Build next single-loop patrol request from parent
+                                parent = schedule_row.scheduled_task
+                                if not isinstance(parent.task_request, dict):
+                                    try:
+                                        task_request_data = json.loads(
+                                            parent.task_request
+                                        )
+                                    except Exception:
+                                        task_request_data = {}
+                                else:
+                                    task_request_data = dict(parent.task_request)
+
+                                if (
+                                    isinstance(task_request_data, dict)
+                                    and task_request_data.get("category") == "patrol"
+                                    and isinstance(
+                                        task_request_data.get("description"), dict
+                                    )
+                                ):
+                                    task_request_data = {
+                                        **task_request_data,
+                                        "description": {
+                                            **task_request_data["description"],
+                                            "rounds": 1,
+                                        },
+                                    }
+
+                                    # Maintain schedule correlation labels
+                                    labels2 = list(
+                                        task_request_data.get("labels") or []
+                                    )
+                                    if parent and parent.id:
+                                        labels2.append(f"scheduled_task_id:{parent.id}")
+                                    labels2.append(
+                                        f"scheduled_schedule_id:{schedule_id}"
+                                    )
+                                    # Dedup labels
+                                    seen = set()
+                                    deduped = []
+                                    for x in labels2:
+                                        if x in seen:
+                                            continue
+                                        seen.add(x)
+                                        deduped.append(x)
+                                    task_request_data["labels"] = deduped
+
+                                    dispatch_request = mdl.DispatchTaskRequest(
+                                        type="dispatch_task_request",
+                                        request=mdl.TaskRequest(
+                                            **{
+                                                **task_request_data,
+                                                "unix_millis_earliest_start_time": 0,
+                                                "unix_millis_request_time": now_wall_millis(),
+                                            }
+                                        ),
+                                    )
+                                    logger.info(
+                                        "chain: dispatching next single-loop patrol for schedule_id=%s",
+                                        schedule_id,
+                                    )
+                                    await post_dispatch_task(
+                                        dispatch_request, task_repo
+                                    )
+                except Exception:
+                    logger.exception(
+                        "chain: failed to dispatch next single-loop patrol"
+                    )
 
     elif payload_type == "task_log_update":
         task_log = mdl.TaskEventLog(**msg["data"])

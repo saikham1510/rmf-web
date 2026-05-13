@@ -396,7 +396,7 @@ function PatrolTaskForm({ taskDesc, patrolWaypoints, onChange, allowSubmit }: Pa
 
   return (
     <Grid container spacing={theme.spacing(2)} justifyContent="center" alignItems="center">
-      <Grid item xs={10}>
+      <Grid item xs={12}>
         <Autocomplete
           id="place-input"
           freeSolo
@@ -412,20 +412,7 @@ function PatrolTaskForm({ taskDesc, patrolWaypoints, onChange, allowSubmit }: Pa
           renderInput={(params) => <TextField {...params} label="Place Name" required={true} />}
         />
       </Grid>
-      <Grid item xs={2}>
-        <PositiveIntField
-          id="loops"
-          label="Loops"
-          value={taskDesc.rounds}
-          onChange={(_ev, val) => {
-            onInputChange({
-              ...taskDesc,
-              rounds: val,
-            });
-          }}
-        />
-      </Grid>
-      <Grid item xs={10}>
+      <Grid item xs={12}>
         <PlaceList
           places={taskDesc && taskDesc.places ? taskDesc.places : []}
           onClick={(places_index) =>
