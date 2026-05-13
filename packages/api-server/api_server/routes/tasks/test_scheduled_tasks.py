@@ -1,5 +1,8 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
+from api_server.models import tortoise_models as ttm
+from api_server.routes.tasks import scheduled_tasks as scheduled_tasks_module
 from api_server.test import AppFixture
 
 
@@ -157,3 +160,80 @@ class TestScheduledTasksRoute(AppFixture):
         self.assertEqual(200, resp.status_code, resp.json())
         tasks = {x["id"]: x for x in resp.json()}
         self.assertIn(task["id"], tasks)
+
+    def test_create_scheduled_task_persists_computed_next_run(self):
+        scheduled_task = {
+            "task_request": {
+                "category": "test",
+                "description": "test",
+            },
+            "schedules": [
+                {
+                    "period": "day",
+                    "start_from": 1000,
+                }
+            ],
+        }
+
+        expected_start = datetime.now(timezone.utc) + timedelta(days=1)
+        with patch.object(
+            scheduled_tasks_module,
+            "compute_next_run",
+            return_value=expected_start,
+        ) as mock_compute:
+            resp = self.client.post("/scheduled_tasks", json=scheduled_task)
+
+        self.assertEqual(201, resp.status_code, resp.json())
+        mock_compute.assert_called()
+        task = resp.json()
+        self.assertEqual(len(task["schedules"]), 1)
+        returned_start = datetime.fromisoformat(
+            task["schedules"][0]["start_from"].replace("Z", "+00:00")
+        )
+        self.assertEqual(returned_start, expected_start)
+
+    def test_dispatch_scheduled_patrol_forces_single_round(self):
+        portal = self.get_portal()
+
+        async def create_schedule() -> int:
+            task = await ttm.ScheduledTask.create(
+                task_request={
+                    "category": "patrol",
+                    "description": {
+                        "places": ["wp1", "wp2"],
+                        "rounds": 7,
+                    },
+                },
+                created_by="test",
+            )
+            schedule = await ttm.ScheduledTaskSchedule.create(
+                scheduled_task=task,
+                period=ttm.ScheduledTaskSchedule.Period.Day,
+                start_from=datetime.now(timezone.utc),
+                dispatched=True,
+            )
+            return schedule.get_id()
+
+        schedule_id = portal.call(create_schedule)
+        captured_requests = []
+
+        async def fake_post_dispatch_task(dispatch_request, _task_repo):
+            captured_requests.append(dispatch_request)
+
+        with patch.object(
+            scheduled_tasks_module,
+            "post_dispatch_task",
+            side_effect=fake_post_dispatch_task,
+        ), patch.object(
+            scheduled_tasks_module,
+            "compute_next_run",
+            return_value=None,
+        ):
+            portal.call(
+                scheduled_tasks_module._dispatch_scheduled_schedule, schedule_id
+            )
+
+        self.assertEqual(1, len(captured_requests))
+        request_payload = captured_requests[0].request
+        self.assertEqual("patrol", request_payload.category)
+        self.assertEqual(1, request_payload.description["rounds"])

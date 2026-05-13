@@ -26,6 +26,11 @@ from api_server.models import (
 )
 from api_server.models import tortoise_models as ttm
 from api_server.repositories import TaskRepository
+from api_server.utils.schedule_utils import (
+    _occurrence_allowed,
+    compute_next_run,
+    should_skip_due_to_planned_end,
+)
 from api_server.utils.time_utils import now_wall_millis, wall_millis_to_datetime
 
 from .tasks import post_dispatch_task
@@ -77,6 +82,36 @@ class PostScheduledTaskRequest(BaseModel):
     schedules: list[ScheduledTaskSchedule]
 
 
+async def _create_schedule_with_next_run(
+    parent_task: ttm.ScheduledTask,
+    schedule_request: ScheduledTaskSchedule,
+) -> ttm.ScheduledTaskSchedule:
+    if schedule_request.start_from is None:
+        raise HTTPException(422, "start_from is required for scheduled tasks")
+
+    sche = await ttm.ScheduledTaskSchedule.create(
+        scheduled_task=parent_task,
+        start_from=normalize_to_utc(schedule_request.start_from),
+        until=normalize_to_utc(schedule_request.until),
+        planned_end_at=schedule_request.planned_end_at,
+        at=schedule_request.at,
+        every=schedule_request.every,
+        period=schedule_request.period,
+        dispatched=False,
+    )
+
+    after_dt = normalize_to_utc(schedule_request.start_from) or datetime.now(
+        timezone.utc
+    )
+    next_run = compute_next_run(sche, after_dt)
+    if next_run is None:
+        raise HTTPException(422, "Task is never going to run")
+
+    sche.start_from = next_run
+    await sche.save(update_fields=["start_from"])
+    return sche
+
+
 async def schedule_task(task: ttm.ScheduledTask, task_repo: TaskRepository):
     """Validate that the scheduled task has at least one valid schedule."""
     await task.fetch_related("schedules")
@@ -122,6 +157,46 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
     else:
         task_request_data = task.task_request
 
+    # Scheduled patrols are dispatched one loop at a time so recurrence bounds
+    # (planned end / until) can control when to stop.
+    if (
+        isinstance(task_request_data, dict)
+        and task_request_data.get("category") == "patrol"
+        and isinstance(task_request_data.get("description"), dict)
+    ):
+        task_request_data = {
+            **task_request_data,
+            "description": {
+                **task_request_data["description"],
+                "rounds": 1,
+            },
+        }
+
+    # Attach schedule context labels so downstream consumers (e.g. completion
+    # chaining) can correlate a dispatched task back to its schedule. Labels are
+    # optional in the schema, so create/extend as needed.
+    try:
+        if isinstance(task_request_data, dict):
+            labels = list(task_request_data.get("labels") or [])
+            # Mark which scheduled_task and schedule row produced this dispatch
+            if schedule_row is not None and getattr(
+                schedule_row, "scheduled_task", None
+            ):
+                labels.append(f"scheduled_task_id:{schedule_row.scheduled_task.id}")
+            labels.append(f"scheduled_schedule_id:{schedule_id}")
+            # De-duplicate while preserving order
+            seen = set()
+            deduped = []
+            for x in labels:
+                if x in seen:
+                    continue
+                seen.add(x)
+                deduped.append(x)
+            task_request_data["labels"] = deduped
+    except Exception:
+        # Non-fatal: labels are just hints
+        logger.exception("failed to attach schedule labels to task_request")
+
     task_request = TaskRequest(**task_request_data)
     # The scheduled trigger time is authoritative; dispatch immediately when the
     # schedule fires.
@@ -145,6 +220,30 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
         schedule_id,
         task.id,
     )
+    # After dispatch, compute the next occurrence and persist it (DB-driven recurrence)
+    try:
+        now_utc = datetime.now(timezone.utc)
+        next_run = compute_next_run(schedule_row, now_utc)
+        if next_run is None:
+            # No further occurrences; leave dispatched=True to indicate finished
+            logger.info(
+                "schedule_id=%s has no further occurrences; marking finished",
+                schedule_id,
+            )
+            return
+        # Otherwise, update start_from and clear dispatched so scheduler can pick it up later
+        schedule_row.start_from = next_run
+        schedule_row.dispatched = False
+        await schedule_row.save(update_fields=["start_from", "dispatched"])
+        logger.info(
+            "schedule_id=%s next_run updated to %s",
+            schedule_id,
+            next_run.isoformat(),
+        )
+    except Exception:
+        logger.exception(
+            "failed computing or persisting next run for schedule_id=%s", schedule_id
+        )
 
 
 async def scheduler_loop(poll_interval: float = 1.0):
@@ -190,6 +289,35 @@ async def scheduler_loop(poll_interval: float = 1.0):
                     )
 
                 if schedule_start > now:
+                    continue
+
+                if should_skip_due_to_planned_end(
+                    schedule_row, now, candidate_dt_utc=schedule_start
+                ):
+                    logger.info(
+                        "schedule_id=%s skipped because now=%s is past planned_end_at=%s",
+                        schedule_row.get_id(),
+                        now.isoformat(),
+                        schedule_row.planned_end_at,
+                    )
+                    await ttm.ScheduledTaskSchedule.filter(
+                        _id=schedule_row.get_id()
+                    ).update(dispatched=True)
+                    continue
+
+                # Check bounds (until, planned_end_at, except_dates) before claiming
+                if not _occurrence_allowed(
+                    schedule_row, schedule_start, schedule_row.scheduled_task
+                ):
+                    logger.info(
+                        "schedule_id=%s occurrence %s not allowed by bounds; marking finished",
+                        schedule_row.get_id(),
+                        schedule_start.isoformat(),
+                    )
+                    # Mark finished to avoid further attempts
+                    await ttm.ScheduledTaskSchedule.filter(
+                        _id=schedule_row.get_id()
+                    ).update(dispatched=True)
                     continue
 
                 logger.info(
@@ -284,21 +412,9 @@ async def post_scheduled_task(
                 ),
                 created_by=user.username,
             )
-            schedules = [
-                ttm.ScheduledTaskSchedule(
-                    scheduled_task=scheduled_task,
-                    start_from=normalize_to_utc(schedule_request.start_from),
-                    until=normalize_to_utc(schedule_request.until),
-                    planned_end_at=schedule_request.planned_end_at,
-                    at=schedule_request.at,
-                    every=schedule_request.every,
-                    period=schedule_request.period,
-                    dispatched=False,
-                )
-                for schedule_request in scheduled_task_request.schedules
-            ]
-
-            await ttm.ScheduledTaskSchedule.bulk_create(schedules)
+            # Create schedules and compute authoritative start_from per-schedule
+            for schedule_request in scheduled_task_request.schedules:
+                await _create_schedule_with_next_run(scheduled_task, schedule_request)
             await schedule_task(scheduled_task, task_repo)
         scheduled_task = await ttm.ScheduledTask.get_or_none(
             id=scheduled_task.id
@@ -412,25 +528,10 @@ async def update_schedule_task(
                     ),
                     created_by=task.created_by,
                 )
-                schedules = [
-                    ttm.ScheduledTaskSchedule(
-                        scheduled_task=scheduled_task,
-                        start_from=normalize_to_utc(schedule_request.start_from),
-                        until=normalize_to_utc(schedule_request.until),
-                        planned_end_at=schedule_request.planned_end_at,
-                        at=schedule_request.at,
-                        every=schedule_request.every,
-                        period=schedule_request.period,
-                        dispatched=False,
+                for schedule_request in scheduled_task_request.schedules:
+                    await _create_schedule_with_next_run(
+                        scheduled_task, schedule_request
                     )
-                    for schedule_request in scheduled_task_request.schedules
-                    if schedule_request.start_from is not None
-                ]
-                if len(schedules) != len(scheduled_task_request.schedules):
-                    raise HTTPException(
-                        422, "start_from is required for scheduled tasks"
-                    )
-                await ttm.ScheduledTaskSchedule.bulk_create(schedules)
             else:
                 task.update_from_dict(
                     {
@@ -445,28 +546,15 @@ async def update_schedule_task(
                     await sche.delete()
 
                 await task.save()
-                schedules = [
-                    ttm.ScheduledTaskSchedule(
-                        scheduled_task=task,
-                        start_from=normalize_to_utc(schedule_request.start_from),
-                        until=normalize_to_utc(schedule_request.until),
-                        planned_end_at=schedule_request.planned_end_at,
-                        at=schedule_request.at,
-                        every=schedule_request.every,
-                        period=schedule_request.period,
-                        dispatched=False,
-                    )
-                    for schedule_request in scheduled_task_request.schedules
-                    if schedule_request.start_from is not None
-                ]
-                if len(schedules) != len(scheduled_task_request.schedules):
-                    raise HTTPException(
-                        422, "start_from is required for scheduled tasks"
-                    )
+                for schedule_request in scheduled_task_request.schedules:
+                    await _create_schedule_with_next_run(task, schedule_request)
 
-                await ttm.ScheduledTaskSchedule.bulk_create(schedules)
-
-        return ScheduledTask.model_validate(task)
+        refreshed_task = await ttm.ScheduledTask.get_or_none(
+            id=task.id
+        ).prefetch_related("schedules")
+        if refreshed_task is None:
+            raise HTTPException(500)
+        return ScheduledTask.model_validate(refreshed_task)
     except HTTPException:
         raise
     except Exception as e:
