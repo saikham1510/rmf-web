@@ -32,6 +32,12 @@ CHAIN_PATROLS = os.getenv("RMF_CHAIN_SCHEDULED_PATROLS", "false").lower() in (
     "yes",
 )
 
+# Log chaining mode at import so operators can confirm behavior
+logger.info(
+    "scheduled patrol chaining enabled=%s (env RMF_CHAIN_SCHEDULED_PATROLS)",
+    CHAIN_PATROLS,
+)
+
 
 def log_phase_has_error(phase: mdl.Phases) -> bool:
     if phase.log:
@@ -169,9 +175,9 @@ async def process_msg(msg: Dict[str, Any], fleet_repo: FleetRepository) -> None:
                                         task_request_data.get("labels") or []
                                     )
                                     if parent and parent.id:
-                                        labels2.append(f"scheduled_task_id:{parent.id}")
+                                        labels2.append(f"scheduled_task_id={parent.id}")
                                     labels2.append(
-                                        f"scheduled_schedule_id:{schedule_id}"
+                                        f"scheduled_schedule_id={schedule_id}"
                                     )
                                     # Dedup labels
                                     seen = set()
@@ -234,10 +240,24 @@ async def rmf_gateway(websocket: WebSocket):
         while True:
             try:
                 msg: Dict[str, Any] = await websocket.receive_json()
+            except WebSocketDisconnect as e:
+                # Client disconnected; exit gracefully without sending on closed socket
+                logger.warning(
+                    "Gateway websocket disconnected: code=%s reason=%s",
+                    e.code,
+                    getattr(e, "reason", None),
+                )
+                break
             except Exception as e:
-                # Could not parse JSON — log and notify client
+                # Could not parse JSON — log and attempt to notify client if still open
                 logger.warning("Failed to receive/parse websocket message: %s", e)
-                await websocket.send_json({"type": "error", "message": "invalid json"})
+                try:
+                    await websocket.send_json(
+                        {"type": "error", "message": "invalid json"}
+                    )
+                except Exception:
+                    # Socket likely already closing/closed; suppress to avoid ASGI error
+                    logger.debug("Websocket likely closed; skipping error send")
                 continue
 
             try:
@@ -248,9 +268,7 @@ async def rmf_gateway(websocket: WebSocket):
                 try:
                     await websocket.send_json({"type": "error", "message": str(e)})
                 except Exception:
-                    logger.exception(
-                        "Failed to send error response to websocket client"
-                    )
+                    logger.debug("Websocket likely closed; skipping error send")
                 continue
             except Exception:
                 logger.exception("Unexpected error processing gateway message")
@@ -259,9 +277,7 @@ async def rmf_gateway(websocket: WebSocket):
                         {"type": "error", "message": "internal server error"}
                     )
                 except Exception:
-                    logger.exception(
-                        "Failed to send internal error to websocket client"
-                    )
+                    logger.debug("Websocket likely closed; skipping error send")
                 continue
     except WebSocketDisconnect:
         pass

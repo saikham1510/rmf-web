@@ -18,13 +18,16 @@ from api_server.fast_io import FastIORouter
 from api_server.logger import logger
 from api_server.models import (
     DispatchTaskRequest,
+    LoopSummary,
     Pagination,
     ScheduledTask,
     ScheduledTaskSchedule,
+    ScheduleRun,
     TaskRequest,
     User,
 )
 from api_server.models import tortoise_models as ttm
+from api_server.models.labels import Labels
 from api_server.repositories import TaskRepository
 from api_server.utils.schedule_utils import (
     _occurrence_allowed,
@@ -182,8 +185,8 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
             if schedule_row is not None and getattr(
                 schedule_row, "scheduled_task", None
             ):
-                labels.append(f"scheduled_task_id:{schedule_row.scheduled_task.id}")
-            labels.append(f"scheduled_schedule_id:{schedule_id}")
+                labels.append(f"scheduled_task_id={schedule_row.scheduled_task.id}")
+            labels.append(f"scheduled_schedule_id={schedule_id}")
             # De-duplicate while preserving order
             seen = set()
             deduped = []
@@ -569,3 +572,110 @@ async def del_scheduled_tasks(task_id: int):
         for sche in task.schedules:
             await sche.delete()
         await task.delete()
+
+
+@router.get("/{task_id}/runs", response_model=list[ScheduleRun])
+async def get_scheduled_task_runs(task_id: int) -> list[ScheduleRun]:
+    """
+    Returns grouped loop runs per schedule for a given scheduled task id.
+    Each loop corresponds to a single dispatched RMF task (one patrol round).
+    Grouping is based on the `scheduled_schedule_id:<id>` label attached at dispatch.
+    """
+    task = await ttm.ScheduledTask.get_or_none(id=task_id).prefetch_related("schedules")
+    if task is None:
+        raise HTTPException(404)
+
+    repo = TaskRepository(INTERNAL_USER)
+    groups: list[ScheduleRun] = []
+
+    for sche in task.schedules:
+        sched_id = sche.get_id()
+        label = Labels.from_strings([f"scheduled_schedule_id={sched_id}"])
+        loops_states = await repo.query_task_states(label=label)
+        # Sort by start time for readability
+        loops_states.sort(key=lambda s: (s.unix_millis_start_time or 0))
+        loops: list[LoopSummary] = [
+            LoopSummary(
+                task_id=ts.booking.id,
+                status=ts.status.value if ts.status else None,
+                unix_millis_start_time=ts.unix_millis_start_time,
+                unix_millis_finish_time=ts.unix_millis_finish_time,
+            )
+            for ts in loops_states
+        ]
+        groups.append(
+            ScheduleRun(
+                schedule_id=sched_id,
+                start_from=sche.start_from,
+                until=sche.until,
+                planned_end_at=sche.planned_end_at,
+                loops=loops,
+            )
+        )
+
+    return groups
+
+
+@router.post("/{task_id}/backfill_labels")
+async def backfill_labels_for_scheduled_task(task_id: int) -> dict:
+    """
+    Backfill TaskLabel rows for past loops dispatched from the given
+    scheduled task by copying labels from the saved TaskRequest when
+    RMF did not echo labels on booking. Useful to make historical runs
+    appear in the grouping endpoint.
+    """
+    # Validate parent exists
+    parent = await ttm.ScheduledTask.get_or_none(id=task_id)
+    if parent is None:
+        raise HTTPException(404)
+
+    repo = TaskRepository(INTERNAL_USER)
+    updated = 0
+    scanned = 0
+
+    # Scan all saved task requests and pick those that contain the
+    # correlation label for this parent scheduled task.
+    # This is a conservative pass; DBs are typically small in demos.
+    all_reqs = await ttm.TaskRequest.all()
+    for req in all_reqs:
+        scanned += 1
+        try:
+            data = req.request if isinstance(req.request, dict) else None
+            if not data:
+                continue
+            labels: list[str] = data.get("labels") or []
+            if not isinstance(labels, list):
+                continue
+            # Accept both legacy colon and new equals labels
+            if not (
+                f"scheduled_task_id:{task_id}" in labels
+                or f"scheduled_task_id={task_id}" in labels
+            ):
+                continue
+
+            # Load task state row; if exists, write labels if any are missing
+            db_task_state = await ttm.TaskState.get_or_none(id_=req.id)
+            if db_task_state is None:
+                continue
+
+            try:
+                # Normalize legacy colon labels to key=value before parsing
+                norm = []
+                for s in labels:
+                    if s.startswith("scheduled_task_id:"):
+                        norm.append(s.replace(":", "=", 1))
+                    elif s.startswith("scheduled_schedule_id:"):
+                        norm.append(s.replace(":", "=", 1))
+                    else:
+                        norm.append(s)
+                parsed = Labels.from_strings(norm)
+                await repo.save_task_labels(db_task_state, parsed)
+                updated += 1
+            except Exception:
+                logger.exception(
+                    "backfill: failed to save labels for task_id=%s", req.id
+                )
+        except Exception:
+            logger.exception("backfill: error scanning saved task request")
+
+    return {"scanned": scanned, "updated": updated}
