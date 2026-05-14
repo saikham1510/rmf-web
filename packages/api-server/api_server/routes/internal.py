@@ -115,12 +115,12 @@ async def process_msg(msg: Dict[str, Any], fleet_repo: FleetRepository) -> None:
                             x
                             for x in labels
                             if isinstance(x, str)
-                            and x.startswith("scheduled_schedule_id:")
+                            and x.startswith("scheduled_schedule_id=")
                         ),
                         None,
                     )
                     if sched_label:
-                        _, _, id_str = sched_label.partition(":")
+                        _, _, id_str = sched_label.partition("=")
                         schedule_id = int(id_str)
                         schedule_row = await ttm.ScheduledTaskSchedule.get_or_none(
                             _id=schedule_id
