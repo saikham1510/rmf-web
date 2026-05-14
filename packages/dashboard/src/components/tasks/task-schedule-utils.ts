@@ -124,11 +124,16 @@ export const scheduleToEvents = (
       const curToIso = cur.toISOString();
       const curFormatted = `${curToIso.slice(0, 10)}`;
       if (!task.except_dates?.includes(curFormatted)) {
+        const baseTitle = getEventTitle();
+        // Try to surface schedule id when the API provides it (optional)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const schedId = (schedule as any)?.id;
+        const title = schedId != null ? `[S:${schedId}] ${baseTitle}` : baseTitle;
         events.push({
           start: cur,
           end: getPlannedEnd(cur, schedule.planned_end_at),
           event_id: getEventId(),
-          title: getEventTitle(),
+          title,
         });
       }
     }
@@ -195,6 +200,6 @@ export const getScheduledTaskTitle = (task: ScheduledTask): string => {
   if (!task.task_request || !task.task_request.category) {
     return `[${task.id}] Unknown`;
   }
-
-  return task.task_request ? getShortDescription(task.task_request) : '';
+  const desc = task.task_request ? getShortDescription(task.task_request) : '';
+  return `[${task.id}] ${desc}`;
 };
