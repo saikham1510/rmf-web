@@ -157,8 +157,10 @@ async def post_dispatch_task(
         logger.info("post_dispatch_task() RMF service returned failure")
         return RawJSONResponse(resp.model_dump_json(), 400)
     task_state = cast(mdl.TaskDispatchResponse1, resp.root).state
-    await task_repo.save_task_state(task_state)
+    # Save the original dispatch request first so save_task_state() can
+    # fall back to it for labels when RMF does not echo labels in booking.
     await task_repo.save_task_request(task_state.booking.id, request.request)
+    await task_repo.save_task_state(task_state)
     logger.info(
         "post_dispatch_task() RMF dispatch success booking_id=%s task_id=%s",
         task_state.booking.id,

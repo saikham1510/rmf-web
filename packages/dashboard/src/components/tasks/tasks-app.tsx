@@ -362,7 +362,7 @@ export const TasksApp = React.memo(
               aria-controls={tabPanelId(TaskTablePanel.QueueTable)}
             />
             <Tab
-              label="Scheduled Patrols"
+              label="Scheduled Tasks"
               id={tabId(TaskTablePanel.Schedule)}
               aria-controls={tabPanelId(TaskTablePanel.Schedule)}
             />
