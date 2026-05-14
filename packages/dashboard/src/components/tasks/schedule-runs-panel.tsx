@@ -79,7 +79,7 @@ export const ScheduleRunsPanel: React.FC = () => {
     <Paper elevation={2} style={{ marginTop: 16, padding: 24, backgroundColor: '#fafafa' }}>
       {/* Header Section */}
       <div style={{ marginBottom: 24 }}>
-        <h3 style={{ margin: '0 0 12px 0', color: '#333' }}>Scheduled Patrol Runs</h3>
+        <h3 style={{ margin: '0 0 12px 0', color: '#333' }}>Task Runs</h3>
         <div
           style={{
             display: 'flex',
