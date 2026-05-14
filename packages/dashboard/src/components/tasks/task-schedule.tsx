@@ -101,7 +101,6 @@ export const TaskSchedule = () => {
   const [runsTaskId, setRunsTaskId] = React.useState<number | null>(null);
   const [runs, setRuns] = React.useState<ScheduleRun[] | null>(null);
   const [runsLoading, setRunsLoading] = React.useState(false);
-  const [runsTaskIdInput, setRunsTaskIdInput] = React.useState<string>('');
 
   React.useEffect(() => {
     const sub = AppEvents.refreshTaskApp.subscribe({
@@ -415,38 +414,6 @@ export const TaskSchedule = () => {
       >
         Add Schedule
       </Button>
-
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-        <Button
-          variant="outlined"
-          onClick={() => {
-            const t = eventsMap.current[Number(currentEventIdRef.current)];
-            if (t && t.id) {
-              loadRuns(t.id);
-            }
-          }}
-        >
-          View Runs for Selected
-        </Button>
-        <TextField
-          size="small"
-          label="Scheduled Task ID"
-          value={runsTaskIdInput}
-          onChange={(e) => setRunsTaskIdInput(e.target.value)}
-          inputProps={{ inputMode: 'numeric', pattern: '[0-9]*' }}
-        />
-        <Button
-          variant="contained"
-          onClick={() => {
-            const id = Number(runsTaskIdInput);
-            if (!Number.isNaN(id) && id > 0) {
-              loadRuns(id);
-            }
-          }}
-        >
-          Load Runs
-        </Button>
-      </div>
 
       <input
         ref={uploadFileInputRef}
