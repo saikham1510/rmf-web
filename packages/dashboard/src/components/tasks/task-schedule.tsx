@@ -218,8 +218,10 @@ export const TaskSchedule = () => {
               <div key={grp.schedule_id} style={{ marginTop: 6 }}>
                 <div style={{ fontWeight: 500 }}>Schedule #{grp.schedule_id}</div>
                 <div style={{ fontSize: 12, color: '#555' }}>
-                  start_from: {grp.start_from || '-'} | planned_end_at: {grp.planned_end_at || '-'}{' '}
-                  | until: {grp.until || '-'}
+                  start_from: {grp.start_from ? new Date(grp.start_from).toLocaleString() : '-'} |
+                  planned_end_at:{' '}
+                  {grp.planned_end_at ? new Date(grp.planned_end_at).toLocaleString() : '-'} |
+                  until: {grp.until ? new Date(grp.until).toLocaleString() : '-'}
                 </div>
                 <ol style={{ marginTop: 4, paddingLeft: 18 }}>
                   {grp.loops.map((lp) => (
@@ -433,8 +435,10 @@ export const TaskSchedule = () => {
             >
               <div style={{ fontWeight: 600 }}>Schedule #{grp.schedule_id}</div>
               <div style={{ fontSize: 12, color: '#555' }}>
-                start_from: {grp.start_from || '-'} | planned_end_at: {grp.planned_end_at || '-'} |
-                until: {grp.until || '-'}
+                start_from: {grp.start_from ? new Date(grp.start_from).toLocaleString() : '-'} |
+                planned_end_at:{' '}
+                {grp.planned_end_at ? new Date(grp.planned_end_at).toLocaleString() : '-'} | until:{' '}
+                {grp.until ? new Date(grp.until).toLocaleString() : '-'}
               </div>
               <ol style={{ marginTop: 6, paddingLeft: 18 }}>
                 {grp.loops.map((lp) => (
