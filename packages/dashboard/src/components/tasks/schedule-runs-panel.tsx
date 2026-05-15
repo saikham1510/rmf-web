@@ -75,6 +75,12 @@ export const ScheduleRunsPanel: React.FC = () => {
     }
   };
 
+  const formatDateTime = (dateString?: string | null): string => {
+    if (!dateString) return '—';
+    const date = new Date(dateString);
+    return isNaN(date.getTime()) ? dateString : date.toLocaleString();
+  };
+
   return (
     <Paper elevation={2} style={{ marginTop: 16, padding: 24, backgroundColor: '#fafafa' }}>
       {/* Header Section */}
@@ -190,13 +196,13 @@ export const ScheduleRunsPanel: React.FC = () => {
                     }}
                   >
                     <div>
-                      <strong>Start From:</strong> {grp.start_from || '—'}
+                      <strong>Start From:</strong> {formatDateTime(grp.start_from)}
                     </div>
                     <div>
-                      <strong>Planned End At:</strong> {grp.planned_end_at || '—'}
+                      <strong>Planned End At:</strong> {formatDateTime(grp.planned_end_at)}
                     </div>
                     <div>
-                      <strong>Until:</strong> {grp.until || '—'}
+                      <strong>Until:</strong> {formatDateTime(grp.until)}
                     </div>
                   </div>
                 </div>
