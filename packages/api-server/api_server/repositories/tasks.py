@@ -140,6 +140,25 @@ class TaskRepository:
                     labels = Labels.from_strings(norm)
                     await self.save_task_labels(db_task_state, labels)
 
+    async def save_interruption_token(self, paused_task_id: str, token: str) -> None:
+        try:
+            await ttm.TaskInterruption.update_or_create(
+                {"token": token}, id=paused_task_id
+            )
+        except Exception:
+            logger.exception("failed to save interruption token")
+
+    async def get_interruption_token(self, paused_task_id: str) -> Optional[str]:
+        row = await ttm.TaskInterruption.get_or_none(id=paused_task_id)
+        if row:
+            return row.token
+        return None
+
+    async def delete_interruption_token(self, paused_task_id: str) -> None:
+        row = await ttm.TaskInterruption.get_or_none(id=paused_task_id)
+        if row:
+            await row.delete()
+
     async def query_task_states(
         self,
         task_id: list[str] | None = None,
