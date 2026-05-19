@@ -147,7 +147,7 @@ export const TaskSchedule = () => {
         confirmText={'Ok'}
         cancelText="Cancel"
         open={true}
-        title={'Edit scheduled patrol'}
+        title={'Edit recurring task'}
         submitting={undefined}
         onClose={() => {
           scheduler.close();
@@ -319,6 +319,11 @@ export const TaskSchedule = () => {
     }
   };
 
+  const colorMap: Record<string, string> = {
+    clean: '#22c55e',
+    patrol: '#3b82f6',
+  };
+
   return (
     <>
       <Button
@@ -369,6 +374,25 @@ export const TaskSchedule = () => {
           step: 60,
           cellRenderer: ({ start, ...props }: CellRenderedProps) =>
             disablingCellsWithoutEvents(calendarEvents, { start, ...props }),
+        }}
+        eventRenderer={(event) => {
+          const eventType = String(event.type ?? '').toLowerCase();
+          return (
+            <div
+              style={{
+                backgroundColor: colorMap[eventType] || '#9ca3af',
+                color: 'white',
+                borderRadius: '6px',
+                padding: '2px 6px',
+                fontSize: '12px',
+                overflow: 'hidden',
+                whiteSpace: 'nowrap',
+                height: '100%',
+              }}
+            >
+              {event.title} ({eventType || 'unknown'})
+            </div>
+          );
         }}
         draggable={false}
         editable={true}
@@ -446,7 +470,7 @@ export const TaskSchedule = () => {
           confirmText={'Ok'}
           cancelText="Cancel"
           open={openDeleteScheduleDialog}
-          title={'Delete scheduled patrol'}
+          title={'Delete recurring event'}
           submitting={undefined}
           onClose={() => {
             setOpenDeleteScheduleDialog(false);

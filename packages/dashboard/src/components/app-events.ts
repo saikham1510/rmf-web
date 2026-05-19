@@ -20,6 +20,8 @@ export const AppEvents = {
   refreshTaskApp: new Subject<void>(),
   refreshAlert: new Subject<void>(),
   alertListOpenedAlert: new Subject<Alert | null>(),
+  criticalAlertListUpdated: new Subject<Record<string, any>>(),
+  removeCriticalAlert: new Subject<string>(),
   disabledLayers: new ReplaySubject<Record<string, boolean>>(),
   zoom: new BehaviorSubject<number | null>(null),
   cameraPosition: new BehaviorSubject<Vector3 | null>(null),

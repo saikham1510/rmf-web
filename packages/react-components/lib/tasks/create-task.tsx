@@ -723,6 +723,7 @@ export function CreateTaskForm({
   ...otherProps
 }: CreateTaskFormProps): JSX.Element {
   const theme = useTheme();
+  const SHOW_FAVORITES_UI = false;
   const immediateMode = mode === 'immediate';
   const defaultSchedule: Schedule = {
     startOn: new Date(),
@@ -781,7 +782,7 @@ export function CreateTaskForm({
   };
   // schedule is not supported with batch upload
   const scheduleEnabled = !immediateMode && taskRequests.length === 1;
-  const startTimeEnabled = !immediateMode && taskRequest.category === 'clean';
+  const startTimeEnabled = false;
 
   const updateTasks = () => {
     setTaskRequests((prev) => {
@@ -997,7 +998,7 @@ export function CreateTaskForm({
           </DialogTitle>
           <DialogContent>
             <Grid container direction="row" wrap="nowrap">
-              {showFavorite && (
+              {SHOW_FAVORITES_UI && showFavorite && (
                 <List dense className={classes.taskList} aria-label="Favorites Tasks">
                   <Typography variant="h6" component="div">
                     Favorite tasks
@@ -1028,7 +1029,7 @@ export function CreateTaskForm({
                   })}
                 </List>
               )}
-              {showFavorite && (
+              {SHOW_FAVORITES_UI && showFavorite && (
                 <Divider
                   orientation="vertical"
                   flexItem
@@ -1121,21 +1122,23 @@ export function CreateTaskForm({
                   style={{ marginTop: theme.spacing(2), marginBottom: theme.spacing(2) }}
                 />
                 {renderTaskDescriptionForm()}
-                <Grid container justifyContent="center">
-                  <Button
-                    aria-label="Save as a favorite task"
-                    variant="contained"
-                    color="primary"
-                    onClick={() => {
-                      !callToUpdateFavoriteTask &&
-                        setFavoriteTaskBuffer({ ...favoriteTaskBuffer, name: '', id: '' });
-                      setOpenFavoriteDialog(true);
-                    }}
-                    style={{ marginTop: theme.spacing(2), marginBottom: theme.spacing(2) }}
-                  >
-                    {callToUpdateFavoriteTask ? `Confirm edits` : 'Save as a favorite task'}
-                  </Button>
-                </Grid>
+                {SHOW_FAVORITES_UI && (
+                  <Grid container justifyContent="center">
+                    <Button
+                      aria-label="Save as a favorite task"
+                      variant="contained"
+                      color="primary"
+                      onClick={() => {
+                        !callToUpdateFavoriteTask &&
+                          setFavoriteTaskBuffer({ ...favoriteTaskBuffer, name: '', id: '' });
+                        setOpenFavoriteDialog(true);
+                      }}
+                      style={{ marginTop: theme.spacing(2), marginBottom: theme.spacing(2) }}
+                    >
+                      {callToUpdateFavoriteTask ? `Confirm edits` : 'Save as a favorite task'}
+                    </Button>
+                  </Grid>
+                )}
               </Grid>
               {taskTitles.length > 1 && (
                 <>
@@ -1199,7 +1202,7 @@ export function CreateTaskForm({
           </DialogActions>
         </form>
       </StyledDialog>
-      {openFavoriteDialog && (
+      {SHOW_FAVORITES_UI && openFavoriteDialog && (
         <ConfirmationDialog
           confirmText={callToDeleteFavoriteTask ? 'Delete' : 'Save'}
           cancelText="Back"
