@@ -1,0 +1,27 @@
+{
+  "task_request": {
+    "unix_millis_earliest_start_time": 1779094435493,
+    "unix_millis_request_time": 1779094449532,
+    "priority": {
+      "type": "binary",
+      "value": 0
+    },
+    "category": "patrol",
+    "description": {
+      "places": ["inno_room", "cleaner_pantry"],
+      "rounds": 1
+    },
+    "labels": ["critical=true"],
+    "requester": "stub__scheduled",
+    "fleet_name": null
+  },
+  "schedules": [
+    {"every": null, "start_from": "2026-05-25T08:53:00Z", "until": null, "planned_end_at": "17:14", "period": "monday", "at": "16:53"},
+    {"every": null, "start_from": "2026-05-19T08:53:00Z", "until": null, "planned_end_at": "17:14", "period": "tuesday", "at": "16:53"},
+    {"every": null, "start_from": "2026-05-20T08:53:00Z", "until": null, "planned_end_at": "17:14", "period": "wednesday", "at": "16:53"},
+    {"every": null, "start_from": "2026-05-21T08:53:00Z", "until": null, "planned_end_at": "17:14", "period": "thursday", "at": "16:53"},
+    {"every": null, "start_from": "2026-05-22T08:53:00Z", "until": null, "planned_end_at": "17:14", "period": "friday", "at": "16:53"},
+    {"every": null, "start_from": "2026-05-23T08:53:00Z", "until": null, "planned_end_at": "17:14", "period": "saturday", "at": "16:53"},
+    {"every": null, "start_from": "2026-05-24T08:53:00Z", "until": null, "planned_end_at": "17:14", "period": "sunday", "at": "16:53"}
+  ]
+}

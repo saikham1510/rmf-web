@@ -1,5 +1,5 @@
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pydantic
@@ -8,6 +8,7 @@ from api_server import models as mdl
 from api_server.models import TaskEventLog, TaskState
 from api_server.repositories import TaskRepository
 from api_server.rmf_io import task_events, tasks_service
+from api_server.routes.tasks import tasks as tasks_route
 from api_server.test import AppFixture, make_task_log, make_task_state
 
 
@@ -393,3 +394,67 @@ class TestDispatchTask(AppFixture):
             """
             resp = self.post_task_request()
             self.assertEqual(400, resp.status_code, resp.content)
+
+    def test_critical_label_spawns_watcher(self):
+        task_id = str(uuid4())
+        captured = {"coro": None}
+
+        def fake_spawn(coro):
+            captured["coro"] = coro
+            return None
+
+        with patch.object(
+            tasks_route, "tasks_service"
+        ) as mock_tasks_service, patch.object(
+            tasks_route, "_spawn_background_task", side_effect=fake_spawn
+        ) as mock_spawn:
+            mock_tasks_service.return_value.call = AsyncMock(
+                return_value=(
+                    f'{{ "success": true, "state": {{ "booking": {{ "id": "{task_id}" }} }} }}'
+                )
+            )
+            resp = self.client.post(
+                "/tasks/dispatch_task",
+                content=mdl.DispatchTaskRequest(
+                    type="dispatch_task_request",
+                    request=mdl.TaskRequest(
+                        category="test",
+                        description="description",
+                        labels=["critical=true"],
+                    ),
+                ).model_dump_json(exclude_none=True),
+            )
+            self.assertEqual(200, resp.status_code, resp.content)
+            mock_spawn.assert_called_once()
+        if captured["coro"] is not None:
+            captured["coro"].close()
+
+    def test_extract_assigned_robot_name_from_dispatch_assignment(self):
+        task_state = mdl.TaskState.model_validate(
+            {
+                "booking": {"id": str(uuid4())},
+                "dispatch": {
+                    "status": "dispatched",
+                    "assignment": {
+                        "fleet_name": "TinyRobot",
+                        "expected_robot_name": "TinyRobot1",
+                    },
+                },
+            }
+        )
+        self.assertEqual(
+            "TinyRobot1", tasks_route._extract_assigned_robot_name(task_state)
+        )
+
+    def test_extract_assigned_robot_name_falls_back_to_assigned_to(self):
+        task_state = mdl.TaskState.model_validate(
+            {
+                "booking": {"id": str(uuid4())},
+                "assigned_to": {"group": "TinyRobot", "name": "TinyRobot1"},
+                "status": "underway",
+                "dispatch": None,
+            }
+        )
+        self.assertEqual(
+            "TinyRobot1", tasks_route._extract_assigned_robot_name(task_state)
+        )
