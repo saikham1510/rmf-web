@@ -9,6 +9,8 @@ import PlaceOutlined from '@mui/icons-material/PlaceOutlined';
 import {
   Autocomplete,
   Button,
+  Checkbox,
+  Tooltip,
   Chip,
   Dialog,
   DialogActions,
@@ -35,6 +37,7 @@ import {
   useTheme,
 } from '@mui/material';
 import { DatePicker, TimePicker, DateTimePicker } from '@mui/x-date-pickers';
+import InfoOutlined from '@mui/icons-material/InfoOutlined';
 import type { TaskFavoritePydantic as TaskFavorite, TaskRequest } from 'api-client';
 import React from 'react';
 import { Loading } from '..';
@@ -72,6 +75,9 @@ type TaskDescription = DeliveryTaskDescription | PatrolTaskDescription | CleanTa
 const isNonEmptyString = (value: string): boolean => value.length > 0;
 const isPositiveNumber = (value: number): boolean => value > 0;
 
+const CRITICAL_LABEL = 'critical=true';
+const LEGACY_PREEMPT_LABEL = 'preempt=interrupt';
+
 const isTaskPlaceValid = (place: TaskPlace): boolean => {
   return (
     isNonEmptyString(place.place) &&
@@ -99,6 +105,16 @@ const isPatrolTaskDescriptionValid = (taskDescription: PatrolTaskDescription): b
 
 const isCleanTaskDescriptionValid = (taskDescription: CleanTaskDescription): boolean => {
   return taskDescription.zone.length !== 0;
+};
+
+const hasCriticalLabel = (labels?: string[] | null): boolean => {
+  if (!labels) {
+    return false;
+  }
+  return labels.some(
+    (label) =>
+      label.toLowerCase() === CRITICAL_LABEL || label.toLowerCase() === LEGACY_PREEMPT_LABEL,
+  );
 };
 
 const classes = {
@@ -396,7 +412,7 @@ function PatrolTaskForm({ taskDesc, patrolWaypoints, onChange, allowSubmit }: Pa
 
   return (
     <Grid container spacing={theme.spacing(2)} justifyContent="center" alignItems="center">
-      <Grid item xs={10}>
+      <Grid item xs={12}>
         <Autocomplete
           id="place-input"
           freeSolo
@@ -412,20 +428,7 @@ function PatrolTaskForm({ taskDesc, patrolWaypoints, onChange, allowSubmit }: Pa
           renderInput={(params) => <TextField {...params} label="Place Name" required={true} />}
         />
       </Grid>
-      <Grid item xs={2}>
-        <PositiveIntField
-          id="loops"
-          label="Loops"
-          value={taskDesc.rounds}
-          onChange={(_ev, val) => {
-            onInputChange({
-              ...taskDesc,
-              rounds: val,
-            });
-          }}
-        />
-      </Grid>
-      <Grid item xs={10}>
+      <Grid item xs={12}>
         <PlaceList
           places={taskDesc && taskDesc.places ? taskDesc.places : []}
           onClick={(places_index) =>
@@ -798,6 +801,18 @@ export function CreateTaskForm({
     updateTasks();
   };
 
+  const setTaskCritical = (enabled: boolean) => {
+    const labels = (taskRequest.labels ?? []).filter(
+      (label) =>
+        label.toLowerCase() !== CRITICAL_LABEL && label.toLowerCase() !== LEGACY_PREEMPT_LABEL,
+    );
+    if (enabled) {
+      labels.push(CRITICAL_LABEL);
+    }
+    taskRequest.labels = labels.length > 0 ? labels : undefined;
+    updateTasks();
+  };
+
   const allowSubmit = (allow: boolean) => {
     setFormFullyFilled(allow);
   };
@@ -1113,6 +1128,28 @@ export function CreateTaskForm({
                         });
                         updateTasks();
                       }}
+                    />
+                  </Grid>
+                  <Grid item xs={12}>
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          checked={hasCriticalLabel(taskRequest.labels)}
+                          onChange={(ev) => setTaskCritical(ev.target.checked)}
+                        />
+                      }
+                      label={
+                        <span>
+                          Critical task (interrupt current task on selected robot){' '}
+                          <Tooltip
+                            title={
+                              'Immediate: dispatch-now tasks preempt currently active tasks. Scheduled: label ensures the run will preempt only when it is actually dispatched at its scheduled start.'
+                            }
+                          >
+                            <InfoOutlined fontSize="small" />
+                          </Tooltip>
+                        </span>
+                      }
                     />
                   </Grid>
                 </Grid>

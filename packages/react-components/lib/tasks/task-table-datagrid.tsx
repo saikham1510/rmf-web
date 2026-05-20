@@ -131,25 +131,28 @@ export function TaskDataGridTable({
   setFilterFields,
   setSortFields,
 }: TableDataGridState): JSX.Element {
-  const receiveTimeCacheRef = React.useRef<Map<string, number>>(new Map());
+  // Cache absolute timestamps per task field to lock them in across updates
+  const timestampCacheRef = React.useRef<Map<string, number>>(new Map());
 
   const resolveTaskEventDate = React.useCallback(
     (taskId: string, field: 'start' | 'finish', ts?: number | null): Date | null => {
-      if (ts === undefined || ts === null || ts <= 0) return null;
-
-      if (ts > 1e12) {
-        return new Date(ts);
+      // Accept any positive timestamp value and cache the first one received
+      if (!ts || ts <= 0) {
+        return null;
       }
 
-      const cacheKey = `${taskId}:${field}:${ts}`;
-      const cached = receiveTimeCacheRef.current.get(cacheKey);
+      // Cache the first timestamp we see for this task+field to lock it in
+      // This prevents times from changing when RMF sends updates
+      const cacheKey = `${taskId}:${field}`;
+      const cached = timestampCacheRef.current.get(cacheKey);
+
       if (cached !== undefined) {
         return new Date(cached);
       }
 
-      const receiveTime = Date.now();
-      receiveTimeCacheRef.current.set(cacheKey, receiveTime);
-      return new Date(receiveTime);
+      // First timestamp received, cache it permanently
+      timestampCacheRef.current.set(cacheKey, ts);
+      return new Date(ts);
     },
     [],
   );

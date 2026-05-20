@@ -65,6 +65,10 @@ class ScheduledTaskSchedule(Model):
     def get_id(self) -> int:
         return self._id
 
+    @property
+    def id(self) -> int:  # for Pydantic from_attributes and OpenAPI schema
+        return self.get_id()
+
     def to_job(self) -> schedule.Job:
         if self.every is not None:
             job = schedule.every(self.every)

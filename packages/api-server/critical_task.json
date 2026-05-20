@@ -1,0 +1,8 @@
+{
+  "summary":"Critical test",
+  "request_type":"move",
+  "start":{"name":"tinyRobot1_charger"},
+  "goal":{"name":"cto_room"},
+  "priority":100,
+  "labels":["critical=true"]
+}

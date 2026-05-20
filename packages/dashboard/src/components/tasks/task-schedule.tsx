@@ -5,7 +5,8 @@ import {
   SchedulerHelpers,
   SchedulerProps,
 } from '@aldabil/react-scheduler/types';
-import { Button } from '@mui/material';
+import { Button, TextField } from '@mui/material';
+import { ScheduleRunsPanel } from './schedule-runs-panel';
 import {
   ScheduledTask,
   ScheduledTaskSchedule as ApiSchedule,
@@ -83,6 +84,23 @@ export const TaskSchedule = () => {
   const [scheduleToEdit, setScheduleToEdit] = React.useState<Schedule | undefined>(undefined);
   const [favoritesTasks, setFavoritesTasks] = React.useState<TaskFavorite[]>([]);
   const [isEditingSchedule, setIsEditingSchedule] = React.useState(false);
+  // Minimal types matching API response for grouped runs
+  interface LoopSummary {
+    task_id: string;
+    status?: string | null;
+    unix_millis_start_time?: number | null;
+    unix_millis_finish_time?: number | null;
+  }
+  interface ScheduleRun {
+    schedule_id: number;
+    start_from?: string | null;
+    until?: string | null;
+    planned_end_at?: string | null;
+    loops: LoopSummary[];
+  }
+  const [runsTaskId, setRunsTaskId] = React.useState<number | null>(null);
+  const [runs, setRuns] = React.useState<ScheduleRun[] | null>(null);
+  const [runsLoading, setRunsLoading] = React.useState(false);
 
   React.useEffect(() => {
     const sub = AppEvents.refreshTaskApp.subscribe({
@@ -176,8 +194,73 @@ export const TaskSchedule = () => {
           value={value}
           onChange={onChange}
         />
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Button
+            variant="outlined"
+            onClick={() => {
+              const task = eventsMap.current[Number(currentEventIdRef.current)];
+              if (task && task.id) {
+                loadRuns(task.id);
+              }
+            }}
+          >
+            View Runs
+          </Button>
+        </div>
+        {runsLoading && <div style={{ marginTop: 8 }}>Loading runs…</div>}
+        {runs && runsTaskId && (
+          <div style={{ marginTop: 8, maxHeight: 240, overflow: 'auto' }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              Runs for scheduled task {runsTaskId}
+            </div>
+            {runs.length === 0 && <div>No runs found.</div>}
+            {runs.map((grp) => (
+              <div key={grp.schedule_id} style={{ marginTop: 6 }}>
+                <div style={{ fontWeight: 500 }}>Schedule #{grp.schedule_id}</div>
+                <div style={{ fontSize: 12, color: '#555' }}>
+                  start_from: {grp.start_from ? new Date(grp.start_from).toLocaleString() : '-'} |
+                  planned_end_at:{' '}
+                  {grp.planned_end_at ? new Date(grp.planned_end_at).toLocaleString() : '-'} |
+                  until: {grp.until ? new Date(grp.until).toLocaleString() : '-'}
+                </div>
+                <ol style={{ marginTop: 4, paddingLeft: 18 }}>
+                  {grp.loops.map((lp) => (
+                    <li key={lp.task_id}>
+                      <span style={{ fontFamily: 'monospace' }}>{lp.task_id}</span>
+                      {` — status: ${lp.status || '-'}`}
+                      {` — start: ${lp.unix_millis_start_time ? new Date(lp.unix_millis_start_time).toLocaleString() : '-'}`}
+                      {` — finish: ${lp.unix_millis_finish_time ? new Date(lp.unix_millis_finish_time).toLocaleString() : '-'}`}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ))}
+          </div>
+        )}
       </ConfirmationDialog>
     );
+  };
+
+  const loadRuns = async (taskId: number) => {
+    try {
+      setRunsLoading(true);
+      setRuns(null);
+      setRunsTaskId(taskId);
+      const apiBase =
+        (window as any).__RMF_API_BASE__ ||
+        process.env.REACT_APP_API_BASE ||
+        'http://127.0.0.1:8000';
+      const resp = await fetch(`${apiBase}/scheduled_tasks/${taskId}/runs`);
+      if (!resp.ok) {
+        throw new Error(`failed to load runs: ${resp.status}`);
+      }
+      const data = (await resp.json()) as ScheduleRun[];
+      setRuns(data);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setRunsLoading(false);
+    }
   };
 
   const submitTasks = React.useCallback<Required<CreateTaskFormProps>['submitTasks']>(
@@ -345,6 +428,40 @@ export const TaskSchedule = () => {
         accept="application/json"
         style={{ display: 'none' }}
       />
+      {runsLoading && <div style={{ marginTop: 12 }}>Loading runs…</div>}
+      {runs && (
+        <div style={{ marginTop: 12 }}>
+          <h3 style={{ margin: 0 }}>Runs for scheduled task {runsTaskId}</h3>
+          {runs.length === 0 && <div>No runs found.</div>}
+          {runs.map((grp) => (
+            <div
+              key={grp.schedule_id}
+              style={{ marginTop: 8, padding: 8, border: '1px solid #ddd', borderRadius: 4 }}
+            >
+              <div style={{ fontWeight: 600 }}>Schedule #{grp.schedule_id}</div>
+              <div style={{ fontSize: 12, color: '#555' }}>
+                start_from: {grp.start_from ? new Date(grp.start_from).toLocaleString() : '-'} |
+                planned_end_at:{' '}
+                {grp.planned_end_at ? new Date(grp.planned_end_at).toLocaleString() : '-'} | until:{' '}
+                {grp.until ? new Date(grp.until).toLocaleString() : '-'}
+              </div>
+              <ol style={{ marginTop: 6, paddingLeft: 18 }}>
+                {grp.loops.map((lp) => (
+                  <li key={lp.task_id}>
+                    <span style={{ fontFamily: 'monospace' }}>{lp.task_id}</span>
+                    {` — status: ${lp.status || '-'}`}
+                    {` — start: ${lp.unix_millis_start_time ? new Date(lp.unix_millis_start_time).toLocaleString() : '-'}`}
+                    {` — finish: ${lp.unix_millis_finish_time ? new Date(lp.unix_millis_finish_time).toLocaleString() : '-'}`}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Persistent grouped table panel */}
+      <ScheduleRunsPanel />
 
       <Scheduler
         // react-scheduler does not support refreshing, workaround by mounting a new instance.

@@ -111,12 +111,53 @@ class TaskRepository:
                 id_=task_state.booking.id,
             )
 
-            # Labels attached to a task is not expected to change in task state updates,
-            # so we can skip saving labels if it is not new. Note that if the labels were
-            # to change, the labels we stored for querying would become out of sync.
-            if created and task_state.booking.labels:
-                labels = Labels.from_strings(task_state.booking.labels)
-                await self.save_task_labels(db_task_state, labels)
+            # Persist labels once per task when first seen. If RMF did not echo labels
+            # into the booking, fall back to the saved dispatch request (created earlier
+            # in post_dispatch_task) so that label-based queries (e.g. runs grouping)
+            # still work.
+            if created:
+                lab_strings: list[str] | None = None
+                if task_state.booking.labels:
+                    lab_strings = task_state.booking.labels
+                else:
+                    try:
+                        req = await self.get_task_request(task_state.booking.id)
+                        if req and req.labels:
+                            lab_strings = req.labels
+                    except Exception:
+                        # Non-fatal: absence of labels only affects grouping/filtering
+                        logger.exception("failed to load saved task request for labels")
+                if lab_strings:
+                    # Normalize legacy colon labels to key=value expected by parser
+                    norm = []
+                    for s in lab_strings:
+                        if s.startswith("scheduled_task_id:"):
+                            norm.append(s.replace(":", "=", 1))
+                        elif s.startswith("scheduled_schedule_id:"):
+                            norm.append(s.replace(":", "=", 1))
+                        else:
+                            norm.append(s)
+                    labels = Labels.from_strings(norm)
+                    await self.save_task_labels(db_task_state, labels)
+
+    async def save_interruption_token(self, paused_task_id: str, token: str) -> None:
+        try:
+            await ttm.TaskInterruption.update_or_create(
+                {"token": token}, id=paused_task_id
+            )
+        except Exception:
+            logger.exception("failed to save interruption token")
+
+    async def get_interruption_token(self, paused_task_id: str) -> Optional[str]:
+        row = await ttm.TaskInterruption.get_or_none(id=paused_task_id)
+        if row:
+            return row.token
+        return None
+
+    async def delete_interruption_token(self, paused_task_id: str) -> None:
+        row = await ttm.TaskInterruption.get_or_none(id=paused_task_id)
+        if row:
+            await row.delete()
 
     async def query_task_states(
         self,
