@@ -80,7 +80,7 @@ export const CriticalAlert = React.memo((props: CriticalAlertProps) => {
               } as const
             }
           >
-            {isFire ? '🚨' : '⚠'}
+            {isFire ? 'FIRE' : 'ALERT'}
           </Box>
         }
         action={

@@ -69,7 +69,7 @@ export const AlertStore = React.memo(() => {
   };
   const parseFireMessage = (message: string) => {
     // Example:
-    // 🔥 TinyRobot1 FIRE DETECTED at cleaner_pantry (73.0, -34.5)
+    //  TinyRobot1 FIRE DETECTED at cleaner_pantry (73.0, -34.5)
 
     const robotMatch = message.match(/🔥\s*(.*?)\s*FIRE/i);
     const locationMatch = message.match(/at\s+([^(]+)/i);
