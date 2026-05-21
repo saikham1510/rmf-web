@@ -35,6 +35,7 @@ import {
   TextField,
   Typography,
   useTheme,
+  Menu,
 } from '@mui/material';
 import { DatePicker, TimePicker, DateTimePicker } from '@mui/x-date-pickers';
 import InfoOutlined from '@mui/icons-material/InfoOutlined';
@@ -1115,12 +1116,16 @@ export function CreateTaskForm({
                     </Grid>
                   )}
                   <Grid item xs={startTimeEnabled ? 2 : 12}>
-                    <PositiveIntField
+                    <TextField
+                      select
+                      fullWidth
                       id="priority"
                       label="Priority"
                       // FIXME(AA): The priority object is currently undefined.
                       value={(taskRequest.priority as Record<string, number>)?.value || 0}
-                      onChange={(_ev, val) => {
+                      onChange={(ev) => {
+                        const val = Number(ev.target.value);
+
                         taskRequest.priority = { type: 'binary', value: val };
                         setFavoriteTaskBuffer({
                           ...favoriteTaskBuffer,
@@ -1128,7 +1133,11 @@ export function CreateTaskForm({
                         });
                         updateTasks();
                       }}
-                    />
+                    >
+                      <MenuItem value={0}>Normal</MenuItem>
+                      <MenuItem value={1}>Urgent</MenuItem>
+                      <MenuItem value={2}>Critical</MenuItem>
+                    </TextField>
                   </Grid>
                   <Grid item xs={12}>
                     <FormControlLabel
