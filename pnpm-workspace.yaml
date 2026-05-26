@@ -1,3 +1,16 @@
 packages:
   - 'packages/*'
   - 'pipenv-install'
+allowBuilds:
+  '@fortawesome/fontawesome-common-types': true
+  '@fortawesome/fontawesome-svg-core': true
+  '@fortawesome/free-solid-svg-icons': true
+  '@nestjs/core': true
+  '@openapitools/openapi-generator-cli': true
+  '@swc/core': true
+  canvas: true
+  core-js-pure: true
+  es5-ext: true
+  esbuild: true
+  puppeteer: true
+  styled-components: true
