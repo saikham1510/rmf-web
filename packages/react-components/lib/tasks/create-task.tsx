@@ -604,6 +604,7 @@ export interface Schedule {
   until?: Date;
   at: Date;
   plannedEndAt?: Date;
+  recurring: boolean;
 }
 
 enum ScheduleUntilValue {
@@ -635,22 +636,13 @@ const DaySelectorSwitch: React.VFC<DaySelectorSwitchProps> = ({ disabled, onChan
   );
   return (
     <div>
-      <TextField
-        label="Recurring Every"
-        color="primary"
-        InputProps={{
-          disabled: true,
-          startAdornment: [
-            renderChip(0, 'Mon'),
-            renderChip(1, 'Tue'),
-            renderChip(2, 'Wed'),
-            renderChip(3, 'Thu'),
-            renderChip(4, 'Fri'),
-            renderChip(5, 'Sat'),
-            renderChip(6, 'Sun'),
-          ],
-        }}
-      />
+      {renderChip(0, 'Mon')}
+      {renderChip(1, 'Tue')}
+      {renderChip(2, 'Wed')}
+      {renderChip(3, 'Thu')}
+      {renderChip(4, 'Fri')}
+      {renderChip(5, 'Sat')}
+      {renderChip(6, 'Sun')}
     </div>
   );
 };
@@ -732,6 +724,7 @@ export function CreateTaskForm({
     days: [true, true, true, true, true, true, true],
     until: undefined,
     at: new Date(),
+    recurring: true,
   };
 
   const [openFavoriteDialog, setOpenFavoriteDialog] = React.useState(false);
@@ -757,7 +750,11 @@ export function CreateTaskForm({
   const taskRequest = taskRequests[selectedTaskIdx];
   const [openSchedulingDialog, setOpenSchedulingDialog] = React.useState(false);
   const [schedule, setSchedule] = React.useState<Schedule>(
-    immediateMode ? defaultSchedule : scheduleToEdit ?? defaultSchedule,
+    immediateMode
+      ? defaultSchedule
+      : scheduleToEdit
+        ? { ...defaultSchedule, ...scheduleToEdit, recurring: scheduleToEdit.recurring ?? true }
+        : defaultSchedule,
   );
   const [scheduleUntilValue, setScheduleUntilValue] = React.useState<string>(
     immediateMode
@@ -1057,34 +1054,16 @@ export function CreateTaskForm({
                     <TextField
                       select
                       id="task-type"
-                      label="Task Category"
+                      label="Category"
                       variant="outlined"
                       fullWidth
                       margin="normal"
                       value={taskRequest.category}
                       onChange={handleTaskTypeChange}
                     >
-                      <MenuItem
-                        value="clean"
-                        disabled={!cleaningZones || cleaningZones.length === 0}
-                      >
-                        Clean
-                      </MenuItem>
-                      <MenuItem
-                        value="patrol"
-                        disabled={!patrolWaypoints || patrolWaypoints.length === 0}
-                      >
-                        Patrol
-                      </MenuItem>
-                      <MenuItem
-                        value="delivery"
-                        disabled={
-                          Object.keys(pickupPoints).length === 0 ||
-                          Object.keys(dropoffPoints).length === 0
-                        }
-                      >
-                        Delivery
-                      </MenuItem>
+                      <MenuItem value="patrol">Patrol</MenuItem>
+                      <MenuItem value="clean">Clean</MenuItem>
+                      <MenuItem value="delivery">Delivery</MenuItem>
                     </TextField>
                   </Grid>
                   {startTimeEnabled && (
@@ -1211,7 +1190,7 @@ export function CreateTaskForm({
               <Button
                 variant="contained"
                 color="primary"
-                disabled={submitting || !formFullyFilled}
+                disabled={submitting || !formFullyFilled || taskRequest.category === 'delivery'}
                 className={classes.actionBtn}
                 onClick={() => setOpenSchedulingDialog(true)}
               >
@@ -1279,7 +1258,7 @@ export function CreateTaskForm({
           }}
         >
           <Grid container spacing={theme.spacing(2)} marginTop={theme.spacing(1)}>
-            <Grid item xs={6}>
+            <Grid item xs={12}>
               <DatePicker
                 value={schedule.startOn}
                 onChange={(date) =>
@@ -1334,12 +1313,28 @@ export function CreateTaskForm({
               />
             </Grid>
             <Grid item xs={12}>
-              <DaySelectorSwitch
-                value={schedule.days}
-                disabled={!scheduleEnabled}
-                onChange={(days) => setSchedule((prev) => ({ ...prev, days }))}
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={schedule.recurring}
+                    disabled={!scheduleEnabled}
+                    onChange={(event) =>
+                      setSchedule((prev) => ({ ...prev, recurring: event.target.checked }))
+                    }
+                  />
+                }
+                label="Recurring"
               />
             </Grid>
+            {schedule.recurring && (
+              <Grid item xs={12}>
+                <DaySelectorSwitch
+                  value={schedule.days}
+                  disabled={!scheduleEnabled}
+                  onChange={(days) => setSchedule((prev) => ({ ...prev, days }))}
+                />
+              </Grid>
+            )}
           </Grid>
           <Grid container marginTop={theme.spacing(1)} marginLeft={theme.spacing(0)}>
             <FormControl fullWidth={true}>

@@ -165,6 +165,7 @@ export const scheduleWithSelectedDay = (scheduleTask: ApiSchedule[], date: Date)
           scheduleTask[0].planned_end_at,
         )
       : undefined,
+    recurring: true,
   };
 };
 
@@ -193,6 +194,7 @@ export const apiScheduleToSchedule = (scheduleTask: ApiSchedule[]): Schedule => 
           scheduleTask[0].planned_end_at,
         )
       : undefined,
+    recurring: true,
   };
 };
 

@@ -142,20 +142,66 @@ export const toApiSchedule = (
   const localHours = start.getHours().toString().padStart(2, '0');
   const localMinutes = start.getMinutes().toString().padStart(2, '0');
   const at = `${localHours}:${localMinutes}`;
-  schedule.days[0] &&
-    apiSchedules.push({ period: 'monday', start_from, at, until, planned_end_at });
-  schedule.days[1] &&
-    apiSchedules.push({ period: 'tuesday', start_from, at, until, planned_end_at });
-  schedule.days[2] &&
-    apiSchedules.push({ period: 'wednesday', start_from, at, until, planned_end_at });
-  schedule.days[3] &&
-    apiSchedules.push({ period: 'thursday', start_from, at, until, planned_end_at });
-  schedule.days[4] &&
-    apiSchedules.push({ period: 'friday', start_from, at, until, planned_end_at });
-  schedule.days[5] &&
-    apiSchedules.push({ period: 'saturday', start_from, at, until, planned_end_at });
-  schedule.days[6] &&
-    apiSchedules.push({ period: 'sunday', start_from, at, until, planned_end_at });
+  const recurring = schedule.recurring ?? true;
+  const oneOffUntil = start.toISOString();
+  const scheduleUntil = recurring ? until : oneOffUntil;
+  if (!recurring) {
+    const periodByDay = [
+      'monday',
+      'tuesday',
+      'wednesday',
+      'thursday',
+      'friday',
+      'saturday',
+      'sunday',
+    ] as const;
+    apiSchedules.push({
+      period: periodByDay[start.getDay() === 0 ? 6 : start.getDay() - 1],
+      start_from,
+      at,
+      until: scheduleUntil,
+      planned_end_at,
+    });
+  } else {
+    schedule.days[0] &&
+      apiSchedules.push({ period: 'monday', start_from, at, until: scheduleUntil, planned_end_at });
+    schedule.days[1] &&
+      apiSchedules.push({
+        period: 'tuesday',
+        start_from,
+        at,
+        until: scheduleUntil,
+        planned_end_at,
+      });
+    schedule.days[2] &&
+      apiSchedules.push({
+        period: 'wednesday',
+        start_from,
+        at,
+        until: scheduleUntil,
+        planned_end_at,
+      });
+    schedule.days[3] &&
+      apiSchedules.push({
+        period: 'thursday',
+        start_from,
+        at,
+        until: scheduleUntil,
+        planned_end_at,
+      });
+    schedule.days[4] &&
+      apiSchedules.push({ period: 'friday', start_from, at, until: scheduleUntil, planned_end_at });
+    schedule.days[5] &&
+      apiSchedules.push({
+        period: 'saturday',
+        start_from,
+        at,
+        until: scheduleUntil,
+        planned_end_at,
+      });
+    schedule.days[6] &&
+      apiSchedules.push({ period: 'sunday', start_from, at, until: scheduleUntil, planned_end_at });
+  }
   return {
     task_request: scheduledTaskRequest,
     schedules: apiSchedules,
