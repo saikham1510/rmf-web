@@ -98,3 +98,12 @@ class TaskFavorite(Model):
 
 
 TaskFavoritePydantic = pydantic_model_creator(TaskFavorite)
+
+
+class TaskInterruption(Model):
+    id = CharField(255, pk=True)
+    token = CharField(255, null=False)
+    created = DatetimeField(auto_now_add=True)
+
+
+TaskInterruptionPydantic = pydantic_model_creator(TaskInterruption)
