@@ -1,5 +1,4 @@
 # NOTE: This will eventually replace `gateway.py``
-import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -11,31 +10,46 @@ from api_server.logger import logger as base_logger
 from api_server.models import tortoise_models as ttm
 from api_server.repositories import AlertRepository, FleetRepository, TaskRepository
 from api_server.rmf_io import alert_events, fleet_events, task_events
-from api_server.utils.schedule_utils import (
-    _occurrence_allowed as _sched_occurrence_allowed,
-)
-from api_server.utils.schedule_utils import (
-    should_skip_due_to_planned_end as _sched_skip_due_to_planned_end,
-)
-from api_server.utils.time_utils import now_wall_millis
 
-from .tasks.tasks import post_dispatch_task
+from .tasks import scheduled_tasks as scheduled_tasks_route
 
 router = APIRouter(tags=["_internal"])
 logger = base_logger.getChild("RmfGatewayApp")
 user: mdl.User = mdl.User(username="__rmf_internal__", is_admin=True)
 task_repo = TaskRepository(user)
 alert_repo = AlertRepository(user, task_repo)
-CHAIN_PATROLS = os.getenv("RMF_CHAIN_SCHEDULED_PATROLS", "false").lower() in (
-    "1",
-    "true",
-    "yes",
-)
 
-# Log chaining mode at import so operators can confirm behavior
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes")
+
+
+def _env_category_allowlist() -> set[str]:
+    # Default behavior chains recurring task categories that are typically
+    # schedule-driven. Delivery is intentionally excluded by default because
+    # deployments often treat it as ad-hoc demand work.
+    raw = os.getenv("RMF_CHAIN_ALLOWED_CATEGORIES", "patrol,clean,loop,compose")
+    result = {x.strip() for x in raw.split(",") if x.strip()}
+    return result or {"patrol", "clean", "loop", "compose"}
+
+
+# Default-on chaining so schedules continue automatically out of the box.
+# Backwards compatible: old env var still works as fallback when the new one
+# is not provided.
+CHAIN_SCHEDULED_TASKS = _env_bool(
+    "RMF_CHAIN_SCHEDULED_TASKS",
+    _env_bool("RMF_CHAIN_SCHEDULED_PATROLS", True),
+)
+CHAIN_ALLOWED_CATEGORIES = _env_category_allowlist()
+
+# Log chaining mode at import so operators can confirm behavior.
 logger.info(
-    "scheduled patrol chaining enabled=%s (env RMF_CHAIN_SCHEDULED_PATROLS)",
-    CHAIN_PATROLS,
+    "scheduled task chaining enabled=%s categories=%s (env RMF_CHAIN_SCHEDULED_TASKS, RMF_CHAIN_ALLOWED_CATEGORIES)",
+    CHAIN_SCHEDULED_TASKS,
+    sorted(CHAIN_ALLOWED_CATEGORIES),
 )
 
 
@@ -86,15 +100,47 @@ async def process_msg(msg: Dict[str, Any], fleet_repo: FleetRepository) -> None:
         await task_repo.save_task_state(task_state)
         task_events.task_states.on_next(task_state)
 
+        if task_state.status in scheduled_tasks_route.ACTIVE_SCHEDULED_TASK_STATUSES:
+            try:
+                labels = task_state.booking.labels or []
+                if not labels:
+                    req = await task_repo.get_task_request(task_state.booking.id)
+                    if req and req.labels:
+                        labels = req.labels
+                sched_label = next(
+                    (
+                        x
+                        for x in labels
+                        if isinstance(x, str) and x.startswith("scheduled_schedule_id=")
+                    ),
+                    None,
+                )
+                if sched_label:
+                    _, _, id_str = sched_label.partition("=")
+                    schedule_id = int(id_str)
+                    schedule_row = await ttm.ScheduledTaskSchedule.get_or_none(
+                        _id=schedule_id
+                    ).select_related("scheduled_task")
+                    if schedule_row and schedule_row.scheduled_task:
+                        await scheduled_tasks_route.cancel_active_scheduled_task_if_overdue(
+                            schedule_row,
+                            task_state,
+                            task_repo,
+                            datetime.now(timezone.utc),
+                        )
+            except Exception:
+                logger.exception(
+                    "chain: failed to evaluate overdue active scheduled task"
+                )
+
         if task_state.status == mdl.TaskStatus.completed:
             alert = await alert_repo.create_alert(task_state.booking.id, "task")
             if alert is not None:
                 alert_events.alerts.on_next(alert)
 
-            # Optional chaining: Immediately enqueue the next single-loop patrol
-            # if this task was dispatched from a scheduled patrol and the
-            # schedule window is still open.
-            if CHAIN_PATROLS:
+            # Optional chaining: enqueue another scheduled task run on completion
+            # while the schedule window remains valid.
+            if CHAIN_SCHEDULED_TASKS:
                 try:
                     labels = task_state.booking.labels or []
                     # Fallback: if RMF did not echo labels into booking, use the
@@ -126,90 +172,14 @@ async def process_msg(msg: Dict[str, Any], fleet_repo: FleetRepository) -> None:
                             _id=schedule_id
                         ).select_related("scheduled_task")
                         if schedule_row and schedule_row.scheduled_task:
-                            now_utc = datetime.now(timezone.utc)
-
-                            # Stop if we're past the window.
-                            if _sched_skip_due_to_planned_end(schedule_row, now_utc):
-                                logger.info(
-                                    "chain: schedule_id=%s stop due to planned_end_at=%s",
-                                    schedule_id,
-                                    schedule_row.planned_end_at,
-                                )
-                            elif not _sched_occurrence_allowed(
-                                schedule_row, now_utc, schedule_row.scheduled_task
-                            ):
-                                logger.info(
-                                    "chain: schedule_id=%s stop due to bounds (until/except_dates)",
-                                    schedule_id,
-                                )
-                            else:
-                                # Build next single-loop patrol request from parent
-                                parent = schedule_row.scheduled_task
-                                if not isinstance(parent.task_request, dict):
-                                    try:
-                                        task_request_data = json.loads(
-                                            parent.task_request
-                                        )
-                                    except Exception:
-                                        task_request_data = {}
-                                else:
-                                    task_request_data = dict(parent.task_request)
-
-                                if (
-                                    isinstance(task_request_data, dict)
-                                    and task_request_data.get("category") == "patrol"
-                                    and isinstance(
-                                        task_request_data.get("description"), dict
-                                    )
-                                ):
-                                    task_request_data = {
-                                        **task_request_data,
-                                        "description": {
-                                            **task_request_data["description"],
-                                            "rounds": 1,
-                                        },
-                                    }
-
-                                    # Maintain schedule correlation labels
-                                    labels2 = list(
-                                        task_request_data.get("labels") or []
-                                    )
-                                    if parent and parent.id:
-                                        labels2.append(f"scheduled_task_id={parent.id}")
-                                    labels2.append(
-                                        f"scheduled_schedule_id={schedule_id}"
-                                    )
-                                    # Dedup labels
-                                    seen = set()
-                                    deduped = []
-                                    for x in labels2:
-                                        if x in seen:
-                                            continue
-                                        seen.add(x)
-                                        deduped.append(x)
-                                    task_request_data["labels"] = deduped
-
-                                    dispatch_request = mdl.DispatchTaskRequest(
-                                        type="dispatch_task_request",
-                                        request=mdl.TaskRequest(
-                                            **{
-                                                **task_request_data,
-                                                "unix_millis_earliest_start_time": 0,
-                                                "unix_millis_request_time": now_wall_millis(),
-                                            }
-                                        ),
-                                    )
-                                    logger.info(
-                                        "chain: dispatching next single-loop patrol for schedule_id=%s",
-                                        schedule_id,
-                                    )
-                                    await post_dispatch_task(
-                                        dispatch_request, task_repo
-                                    )
+                            await scheduled_tasks_route.try_dispatch_chained_schedule_run(
+                                schedule_row,
+                                task_repo,
+                                completed_task_id=task_state.booking.id,
+                                allowed_categories=CHAIN_ALLOWED_CATEGORIES,
+                            )
                 except Exception:
-                    logger.exception(
-                        "chain: failed to dispatch next single-loop patrol"
-                    )
+                    logger.exception("chain: failed to dispatch chained scheduled task")
 
     elif payload_type == "task_log_update":
         task_log = mdl.TaskEventLog(**msg["data"])
