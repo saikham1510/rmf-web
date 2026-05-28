@@ -880,7 +880,7 @@ export function CreateTaskForm({
       }
     }
 
-    const submittingSchedule = !immediateMode && scheduling && scheduleEnabled;
+    const submittingSchedule = !immediateMode && scheduling && !!schedule;
     try {
       setSubmitting(true);
       await submitTasks(taskRequests, submittingSchedule ? schedule : null);

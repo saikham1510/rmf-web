@@ -36,19 +36,13 @@ def _env_category_allowlist() -> set[str]:
     return result or {"patrol", "clean", "loop", "compose"}
 
 
-# Default-on chaining so schedules continue automatically out of the box.
-# Backwards compatible: old env var still works as fallback when the new one
-# is not provided.
-CHAIN_SCHEDULED_TASKS = _env_bool(
-    "RMF_CHAIN_SCHEDULED_TASKS",
-    _env_bool("RMF_CHAIN_SCHEDULED_PATROLS", True),
-)
+# Scheduled task chaining is always enabled; the allow-list still controls
+# which categories are eligible for automatic chaining.
 CHAIN_ALLOWED_CATEGORIES = _env_category_allowlist()
 
 # Log chaining mode at import so operators can confirm behavior.
 logger.info(
-    "scheduled task chaining enabled=%s categories=%s (env RMF_CHAIN_SCHEDULED_TASKS, RMF_CHAIN_ALLOWED_CATEGORIES)",
-    CHAIN_SCHEDULED_TASKS,
+    "scheduled task chaining enabled categories=%s (env RMF_CHAIN_ALLOWED_CATEGORIES)",
     sorted(CHAIN_ALLOWED_CATEGORIES),
 )
 
@@ -140,46 +134,47 @@ async def process_msg(msg: Dict[str, Any], fleet_repo: FleetRepository) -> None:
 
             # Optional chaining: enqueue another scheduled task run on completion
             # while the schedule window remains valid.
-            if CHAIN_SCHEDULED_TASKS:
-                try:
-                    labels = task_state.booking.labels or []
-                    # Fallback: if RMF did not echo labels into booking, use the
-                    # stored request (saved when we dispatched the task).
-                    if not labels:
-                        try:
-                            req = await task_repo.get_task_request(
-                                task_state.booking.id
-                            )
-                            if req and req.labels:
-                                labels = req.labels
-                        except Exception:
-                            logger.exception(
-                                "chain: failed to load saved task request for labels"
-                            )
-                    sched_label = next(
-                        (
-                            x
-                            for x in labels
-                            if isinstance(x, str)
-                            and x.startswith("scheduled_schedule_id=")
-                        ),
-                        None,
-                    )
-                    if sched_label:
-                        _, _, id_str = sched_label.partition("=")
-                        schedule_id = int(id_str)
-                        schedule_row = await ttm.ScheduledTaskSchedule.get_or_none(
-                            _id=schedule_id
-                        ).select_related("scheduled_task")
-                        if schedule_row and schedule_row.scheduled_task:
-                            await scheduled_tasks_route.try_dispatch_chained_schedule_run(
-                                schedule_row,
-                                task_repo,
-                                completed_task_id=task_state.booking.id,
-                                allowed_categories=CHAIN_ALLOWED_CATEGORIES,
-                            )
-                except Exception:
-                    logger.exception("chain: failed to dispatch chained scheduled task")
+            try:
+                labels = task_state.booking.labels or []
+                logger.info(
+                    "chain: completion hook booking_id=%s labels=%s",
+                    task_state.booking.id,
+                    labels,
+                )
+                # Fallback: if RMF did not echo labels into booking, use the
+                # stored request (saved when we dispatched the task).
+                if not labels:
+                    try:
+                        req = await task_repo.get_task_request(task_state.booking.id)
+                        if req and req.labels:
+                            labels = req.labels
+                    except Exception:
+                        logger.exception(
+                            "chain: failed to load saved task request for labels"
+                        )
+                sched_label = next(
+                    (
+                        x
+                        for x in labels
+                        if isinstance(x, str) and x.startswith("scheduled_schedule_id=")
+                    ),
+                    None,
+                )
+                if sched_label:
+                    _, _, id_str = sched_label.partition("=")
+                    schedule_id = int(id_str)
+                    schedule_row = await ttm.ScheduledTaskSchedule.get_or_none(
+                        _id=schedule_id
+                    ).select_related("scheduled_task")
+                    if schedule_row and schedule_row.scheduled_task:
+                        await scheduled_tasks_route.try_dispatch_chained_schedule_run(
+                            schedule_row,
+                            task_repo,
+                            completed_task_id=task_state.booking.id,
+                            allowed_categories=CHAIN_ALLOWED_CATEGORIES,
+                        )
+            except Exception:
+                logger.exception("chain: failed to dispatch chained scheduled task")
 
     elif payload_type == "task_log_update":
         task_log = mdl.TaskEventLog(**msg["data"])

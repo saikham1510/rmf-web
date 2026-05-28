@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import threading
 import time as pytime
 import traceback
@@ -38,7 +39,11 @@ from api_server.utils.schedule_utils import (
     compute_next_run,
     should_skip_due_to_planned_end,
 )
-from api_server.utils.time_utils import now_wall_millis, wall_millis_to_datetime
+from api_server.utils.time_utils import (
+    datetime_to_wall_millis,
+    now_wall_millis,
+    wall_millis_to_datetime,
+)
 
 from .tasks import post_dispatch_task
 
@@ -148,9 +153,10 @@ def _build_request_for_schedule_dispatch(
     # For regular scheduled dispatches use the schedule's authoritative start time;
     # for chained (immediate) runs use current time so RMF shows a sensible timestamp.
     if chain_parent_task_id is None:
-        if schedule_row.start_from is not None:
-            task_request.unix_millis_earliest_start_time = int(
-                schedule_row.start_from.replace(tzinfo=timezone.utc).timestamp() * 1000
+        scheduled_start = schedule_row.next_run_at or schedule_row.start_from
+        if scheduled_start is not None:
+            task_request.unix_millis_earliest_start_time = datetime_to_wall_millis(
+                scheduled_start
             )
         else:
             task_request.unix_millis_earliest_start_time = now_wall_millis()
@@ -243,6 +249,20 @@ async def try_dispatch_chained_schedule_run(
         )
         return False
 
+    # If the next scheduled occurrence is still in the future, do not chain
+    # another run yet. This keeps scheduled work aligned to its actual window
+    # instead of re-dispatching immediately after the previous task completes.
+    next_run_at = schedule_row.next_run_at or schedule_row.start_from
+    if next_run_at is not None:
+        next_run = _ensure_utc_aware(next_run_at)
+        if next_run > now_utc:
+            logger.info(
+                "chain: schedule_id=%s wait until next run at %s",
+                schedule_row.get_id(),
+                next_run.isoformat(),
+            )
+            return False
+
     if await _schedule_has_active_tasks(schedule_row.get_id(), task_repo):
         logger.info(
             "chain: schedule_id=%s skip because another run is still active",
@@ -284,6 +304,67 @@ def _ensure_utc_aware(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _parse_at_time(at: Optional[str]) -> Optional[tuple[int, int]]:
+    if not at:
+        return None
+    m = re.match(r"^(\d{1,2}):(\d{2})$", at)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _matches_schedule_start(
+    schedule_row: ttm.ScheduledTaskSchedule,
+    candidate_dt_utc: datetime,
+) -> bool:
+    at = _parse_at_time(schedule_row.at)
+    if at is None:
+        return False
+
+    local_tz = datetime.now().astimezone().tzinfo
+    local_dt = candidate_dt_utc.astimezone(local_tz)
+    if (local_dt.hour, local_dt.minute) != at:
+        return False
+
+    period = schedule_row.period
+    weekday_map = {
+        ttm.ScheduledTaskSchedule.Period.Monday: 0,
+        ttm.ScheduledTaskSchedule.Period.Tuesday: 1,
+        ttm.ScheduledTaskSchedule.Period.Wednesday: 2,
+        ttm.ScheduledTaskSchedule.Period.Thursday: 3,
+        ttm.ScheduledTaskSchedule.Period.Friday: 4,
+        ttm.ScheduledTaskSchedule.Period.Saturday: 5,
+        ttm.ScheduledTaskSchedule.Period.Sunday: 6,
+    }
+
+    if period == ttm.ScheduledTaskSchedule.Period.Day:
+        return True
+    if period in weekday_map:
+        return local_dt.weekday() == weekday_map[period]
+    return False
+
+
+def _normalize_start_from(
+    start_from: Optional[datetime],
+    at: Optional[str],
+) -> Optional[datetime]:
+    if start_from is None or at is None:
+        return start_from
+    at_time = _parse_at_time(at)
+    if at_time is None:
+        return start_from
+
+    local_tz = datetime.now().astimezone().tzinfo
+    local_dt = _ensure_utc_aware(start_from).astimezone(local_tz)
+    local_dt = local_dt.replace(
+        hour=at_time[0],
+        minute=at_time[1],
+        second=0,
+        microsecond=0,
+    )
+    return local_dt.astimezone(timezone.utc)
+
+
 def validate_schedules(schedules: list[ScheduledTaskSchedule]) -> None:
     """Validate that at least one schedule produces a valid job. Raises HTTPException if none do."""
     valid_count = 0
@@ -320,9 +401,14 @@ async def _create_schedule_with_next_run(
     if schedule_request.start_from is None:
         raise HTTPException(422, "start_from is required for scheduled tasks")
 
+    normalized_start_from = _normalize_start_from(
+        schedule_request.start_from,
+        schedule_request.at,
+    )
+
     sche = await ttm.ScheduledTaskSchedule.create(
         scheduled_task=parent_task,
-        start_from=normalize_to_utc(schedule_request.start_from),
+        start_from=normalize_to_utc(normalized_start_from),
         until=normalize_to_utc(schedule_request.until),
         planned_end_at=schedule_request.planned_end_at,
         at=schedule_request.at,
@@ -331,15 +417,30 @@ async def _create_schedule_with_next_run(
         dispatched=False,
     )
 
-    after_dt = normalize_to_utc(schedule_request.start_from) or datetime.now(
-        timezone.utc
-    )
+    after_dt = normalize_to_utc(normalized_start_from) or datetime.now(timezone.utc)
     next_run = compute_next_run(sche, after_dt)
+    if normalized_start_from is not None:
+        start_dt = normalize_to_utc(normalized_start_from)
+        if start_dt is not None and _matches_schedule_start(sche, start_dt):
+            if _occurrence_allowed(sche, start_dt, parent_task):
+                if next_run is None or next_run > start_dt:
+                    next_run = start_dt
     if next_run is None:
         raise HTTPException(422, "Task is never going to run")
 
-    sche.start_from = next_run
-    await sche.save(update_fields=["start_from"])
+    sche.next_run_at = next_run
+    await sche.save(update_fields=["next_run_at"])
+    logger.info(
+        "scheduled task created schedule_id=%s parent_task_id=%s start_from=%s next_run_at=%s until=%s planned_end_at=%s period=%s at=%s",
+        sche.get_id(),
+        parent_task.id,
+        sche.start_from,
+        sche.next_run_at,
+        sche.until,
+        sche.planned_end_at,
+        sche.period,
+        sche.at,
+    )
     return sche
 
 
@@ -452,6 +553,35 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
         logger.warning("scheduled task schedule_id=%s no longer exists", schedule_id)
         return
 
+    schedule_start_dt = schedule_row.next_run_at or schedule_row.start_from
+    if schedule_start_dt is not None:
+        now_utc = datetime.now(timezone.utc)
+        schedule_start = _ensure_utc_aware(schedule_start_dt)
+        logger.info(
+            "schedule_id=%s dispatch check next_run_at=%s now=%s",
+            schedule_id,
+            schedule_start.isoformat(),
+            now_utc.isoformat(),
+        )
+        if schedule_start > now_utc:
+            logger.warning(
+                "schedule_id=%s dispatch requested before next_run_at=%s (now=%s); deferring",
+                schedule_id,
+                schedule_start.isoformat(),
+                now_utc.isoformat(),
+            )
+            await ttm.ScheduledTaskSchedule.filter(_id=schedule_id).update(
+                dispatched=False
+            )
+            return
+    else:
+        logger.warning(
+            "schedule_id=%s dispatch requested without next_run_at/start_from; deferring",
+            schedule_id,
+        )
+        await ttm.ScheduledTaskSchedule.filter(_id=schedule_id).update(dispatched=False)
+        return
+
     await _dispatch_schedule_task_request(
         schedule_row,
         TaskRepository(INTERNAL_USER),
@@ -467,10 +597,10 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
                 schedule_id,
             )
             return
-        # Otherwise, update start_from and clear dispatched so scheduler can pick it up later
-        schedule_row.start_from = next_run
+        # Otherwise, update next_run_at and clear dispatched so scheduler can pick it up later
+        schedule_row.next_run_at = next_run
         schedule_row.dispatched = False
-        await schedule_row.save(update_fields=["start_from", "dispatched"])
+        await schedule_row.save(update_fields=["next_run_at", "dispatched"])
         logger.info(
             "schedule_id=%s next_run updated to %s",
             schedule_id,
@@ -508,32 +638,41 @@ async def scheduler_loop(poll_interval: float = 1.0):
             due_schedules = await (
                 ttm.ScheduledTaskSchedule.filter(
                     dispatched=False,
-                    start_from__isnull=False,
                 )
                 .select_related("scheduled_task")
-                .order_by("start_from", "_id")
+                .order_by("next_run_at", "_id")
             )
             logger.info("DUE COUNT=%s", len(due_schedules))
 
             for schedule_row in due_schedules:
-                if schedule_row.start_from is None:
+                if schedule_row.next_run_at is None:
+                    next_run = compute_next_run(schedule_row, now)
+                    if next_run is None:
+                        await ttm.ScheduledTaskSchedule.filter(
+                            _id=schedule_row.get_id()
+                        ).update(dispatched=True)
+                        continue
+                    schedule_row.next_run_at = next_run
+                    await schedule_row.save(update_fields=["next_run_at"])
+
+                if schedule_row.next_run_at is None:
                     continue
 
-                schedule_start = _ensure_utc_aware(schedule_row.start_from)
+                schedule_start = _ensure_utc_aware(schedule_row.next_run_at)
 
                 logger.info(
-                    "DB start_from=%s type=%s tz=%s",
-                    schedule_row.start_from,
-                    type(schedule_row.start_from),
-                    getattr(schedule_row.start_from, "tzinfo", None),
+                    "DB next_run_at=%s type=%s tz=%s",
+                    schedule_row.next_run_at,
+                    type(schedule_row.next_run_at),
+                    getattr(schedule_row.next_run_at, "tzinfo", None),
                 )
 
                 # Defensive tzinfo check: treat naive DB datetimes as UTC but log.
-                if schedule_row.start_from.tzinfo is None:
+                if schedule_row.next_run_at.tzinfo is None:
                     logger.warning(
-                        "schedule_id=%s has naive start_from, treating as UTC: %s",
+                        "schedule_id=%s has naive next_run_at, treating as UTC: %s",
                         schedule_row.get_id(),
-                        schedule_row.start_from,
+                        schedule_row.next_run_at,
                     )
 
                 if schedule_start > now:
@@ -569,7 +708,7 @@ async def scheduler_loop(poll_interval: float = 1.0):
                     continue
 
                 logger.info(
-                    "FOUND DUE TASK schedule_id=%s task_id=%s start_from=%s start_from_tz=%s now=%s now_tz=%s",
+                    "FOUND DUE TASK schedule_id=%s task_id=%s next_run_at=%s next_run_tz=%s now=%s now_tz=%s",
                     schedule_row.get_id(),
                     getattr(schedule_row.scheduled_task, "id", None),
                     schedule_start.isoformat(),
@@ -592,11 +731,11 @@ async def scheduler_loop(poll_interval: float = 1.0):
                     continue
 
                 logger.info(
-                    "scheduler triggered schedule_id=%s task_id=%s start_from=%s now=%s",
+                    "scheduler triggered schedule_id=%s task_id=%s next_run_at=%s now=%s",
                     schedule_id,
                     getattr(schedule_row.scheduled_task, "id", None),
-                    schedule_row.start_from.isoformat()
-                    if schedule_row.start_from is not None
+                    schedule_row.next_run_at.isoformat()
+                    if schedule_row.next_run_at is not None
                     else None,
                     now.isoformat(),
                 )
@@ -651,6 +790,16 @@ async def post_scheduled_task(
     # Validate schedules BEFORE entering transaction to avoid rollback on validation failure
     validate_schedules(scheduled_task_request.schedules)
 
+    if scheduled_task_request.schedules:
+        first = scheduled_task_request.schedules[0]
+        logger.info(
+            "scheduled_task create requester=%s start_from=%s at=%s period=%s",
+            scheduled_task_request.task_request.requester,
+            getattr(first.start_from, "isoformat", lambda: None)(),
+            first.at,
+            first.period,
+        )
+
     try:
         task_repo = TaskRepository(user)
         async with tortoise.transactions.in_transaction():
@@ -687,6 +836,14 @@ async def get_scheduled_tasks(
     ),
     pagination: Pagination = Depends(pagination_query),
 ):
+    logger.info(
+        "scheduled task calendar query start_before=%s until_after=%s limit=%s offset=%s order_by=%s",
+        start_before,
+        until_after,
+        pagination.limit,
+        pagination.offset,
+        pagination.order_by,
+    )
     q = (
         ttm.ScheduledTask.filter(
             Q(schedules__start_from__lte=start_before)
@@ -702,6 +859,7 @@ async def get_scheduled_tasks(
         q.order_by(*pagination.order_by)
     results = await q
     await ttm.ScheduledTask.fetch_for_list(results)
+    logger.info("scheduled task calendar query returned %s tasks", len(results))
     return [ScheduledTask.model_validate(x) for x in results]
 
 

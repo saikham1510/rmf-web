@@ -38,17 +38,23 @@ class TaskRepository:
 
     async def save_task_request(self, task_id: str, task_request: TaskRequest) -> None:
         await DbTaskRequest.update_or_create(
-            {"request": task_request.model_dump_json()}, id_=task_id
+            {"request": task_request.model_dump(exclude_none=True)}, id_=task_id
         )
 
     async def get_task_request(self, task_id: str) -> Optional[TaskRequest]:
         result = await DbTaskRequest.get_or_none(id_=task_id)
         if result is None:
             return None
-        if not isinstance(result.request, dict):
-            logger.error(f"request is not a dict: {type(result.request)}")
-            raise HTTPException(500)
-        return TaskRequest(**result.request)
+        if isinstance(result.request, dict):
+            return TaskRequest(**result.request)
+        if isinstance(result.request, str):
+            try:
+                return TaskRequest.model_validate_json(result.request)
+            except Exception as e:
+                logger.error(f"request JSON is invalid: {e}")
+                raise HTTPException(500) from e
+        logger.error(f"request is not a dict or JSON string: {type(result.request)}")
+        raise HTTPException(500)
 
     async def save_task_labels(
         self, db_task_state: ttm.TaskState, labels: Labels

@@ -1,4 +1,6 @@
 import asyncio
+import os
+import time
 from datetime import datetime
 from typing import List, Optional, Tuple, cast
 
@@ -18,10 +20,51 @@ from api_server.logger import logger
 from api_server.repositories import TaskRepository, task_repo_dep
 from api_server.response import RawJSONResponse
 from api_server.rmf_io import task_events, tasks_service
+from api_server.ros import ros_node
+from api_server.utils.time_utils import real_to_sim
 
 router = FastIORouter(tags=["Tasks"])
 
-CRITICAL_PRIORITY_VALUE = 100
+NORMAL_PRIORITY_VALUE = 0
+URGENT_PRIORITY_VALUE = 1
+CRITICAL_PRIORITY_VALUE = 2
+
+PRIORITY_LABEL_VALUES = {
+    "normal": NORMAL_PRIORITY_VALUE,
+    "urgent": URGENT_PRIORITY_VALUE,
+    "critical": CRITICAL_PRIORITY_VALUE,
+}
+
+
+def _use_sim_time() -> bool:
+    raw = os.environ.get("RMF_SERVER_USE_SIM_TIME")
+    if not raw:
+        return False
+    return raw.lower() not in ("0", "false")
+
+
+def _convert_request_times_to_sim(request: mdl.TaskRequest) -> None:
+    if not _use_sim_time():
+        return
+    node = ros_node()
+    if node is None:
+        return
+
+    now_sim = node.get_clock().now().nanoseconds // 1_000_000
+    now_real = int(time.time() * 1000)
+
+    if request.unix_millis_earliest_start_time:
+        request.unix_millis_earliest_start_time = real_to_sim(
+            request.unix_millis_earliest_start_time,
+            now_real,
+            now_sim,
+        )
+    if request.unix_millis_request_time:
+        request.unix_millis_request_time = real_to_sim(
+            request.unix_millis_request_time,
+            now_real,
+            now_sim,
+        )
 
 
 @router.get("/{task_id}/request", response_model=mdl.TaskRequest)
@@ -148,8 +191,8 @@ async def post_dispatch_task(
     request: mdl.DispatchTaskRequest = Body(...),
     task_repo: TaskRepository = Depends(task_repo_dep),
 ):
-    if _has_critical_label(request.request.labels):
-        _ensure_critical_priority(request.request)
+    _convert_request_times_to_sim(request.request)
+    priority_label = _apply_priority_labels(request.request)
     logger.info(
         "post_dispatch_task() calling RMF service task_id=%s request_type=%s",
         getattr(request.request, "task_id", None),
@@ -171,10 +214,10 @@ async def post_dispatch_task(
         task_state.booking.id,
         task_state.booking.id,
     )
-    # If the original request had a critical/preempt label, spawn a watcher to
+    # If the original request had a critical priority label, spawn a watcher to
     # interrupt the awarded robot's active task and resume it after completion.
     try:
-        if _has_critical_label(request.request.labels):
+        if priority_label == "critical":
             # spawn background watcher (fire-and-forget)
             _spawn_background_task(
                 _handle_critical_preemption(
@@ -188,25 +231,41 @@ async def post_dispatch_task(
     return resp
 
 
-def _has_critical_label(labels: Optional[List[str]]) -> bool:
+def _task_priority_label(labels: Optional[List[str]]) -> Optional[str]:
     if not labels:
-        return False
+        return None
+
+    priority_label = None
     for label in labels:
-        if label.lower() in ("critical=true", "preempt=interrupt"):
-            return True
-    return False
+        normalized = label.lower().strip()
+        if normalized in ("critical=true", "preempt=interrupt", "priority=critical"):
+            return "critical"
+        if normalized in ("urgent=true", "priority=urgent"):
+            priority_label = priority_label or "urgent"
+            continue
+        if normalized in ("normal=true", "priority=normal"):
+            priority_label = priority_label or "normal"
+            continue
+        if normalized == "critical":
+            return "critical"
+        if normalized == "urgent":
+            priority_label = priority_label or "urgent"
+            continue
+        if normalized == "normal":
+            priority_label = priority_label or "normal"
+    return priority_label
 
 
-def _ensure_critical_priority(task_request: mdl.TaskRequest) -> None:
-    priority = getattr(task_request, "priority", None)
-    current_value = None
-    if isinstance(priority, dict):
-        current_value = priority.get("value")
-    if (
-        not isinstance(current_value, (int, float))
-        or current_value < CRITICAL_PRIORITY_VALUE
-    ):
-        task_request.priority = {"type": "binary", "value": CRITICAL_PRIORITY_VALUE}
+def _apply_priority_labels(task_request: mdl.TaskRequest) -> Optional[str]:
+    priority_label = _task_priority_label(task_request.labels)
+    if priority_label is None:
+        return None
+
+    task_request.priority = {
+        "type": "binary",
+        "value": PRIORITY_LABEL_VALUES[priority_label],
+    }
+    return priority_label
 
 
 def _spawn_background_task(coro):
@@ -396,8 +455,7 @@ async def _handle_critical_preemption(
             try:
                 critical_request = await task_repo.get_task_request(task_id)
                 if critical_request:
-                    if _has_critical_label(critical_request.labels):
-                        _ensure_critical_priority(critical_request)
+                    _apply_priority_labels(critical_request)
                     forced_labels = list(critical_request.labels or [])
                     forced_labels.append(f"forced_from={task_id}")
                     critical_request.labels = forced_labels

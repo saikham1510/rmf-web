@@ -189,10 +189,15 @@ class TestScheduledTasksRoute(AppFixture):
         mock_compute.assert_called()
         task = resp.json()
         self.assertEqual(len(task["schedules"]), 1)
-        returned_start = datetime.fromisoformat(
-            task["schedules"][0]["start_from"].replace("Z", "+00:00")
-        )
-        self.assertEqual(returned_start, expected_start)
+        schedule_id = task["schedules"][0]["id"]
+        portal = self.get_portal()
+
+        async def load_schedule():
+            return await ttm.ScheduledTaskSchedule.get_or_none(_id=schedule_id)
+
+        schedule_row = portal.call(load_schedule)
+        self.assertIsNotNone(schedule_row)
+        self.assertEqual(schedule_row.next_run_at, expected_start)
 
     def test_dispatch_scheduled_patrol_forces_single_round(self):
         portal = self.get_portal()
