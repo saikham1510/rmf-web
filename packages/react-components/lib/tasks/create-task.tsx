@@ -78,6 +78,28 @@ const isPositiveNumber = (value: number): boolean => value > 0;
 const CRITICAL_LABEL = 'critical=true';
 const LEGACY_PREEMPT_LABEL = 'preempt=interrupt';
 
+const PRIORITY_OPTIONS = [
+  { label: 'Normal', value: 0, color: '#42A5F5' },
+  { label: 'Urgent', value: 1, color: '#FB8C00' },
+  { label: 'Critical', value: 2, color: '#E53935' },
+] as const;
+
+const PRIORITY_DOT_SIZE = 18;
+const PRIORITY_LABEL_GAP = 12;
+
+const isPriorityValue = (value: unknown): value is number => {
+  return typeof value === 'number' && PRIORITY_OPTIONS.some((option) => option.value === value);
+};
+
+const getPriorityValue = (priority: TaskRequest['priority']): number => {
+  const value = (priority as Record<string, number> | undefined)?.value;
+  return isPriorityValue(value) ? value : 0;
+};
+
+const getPriorityOption = (value: number) => {
+  return PRIORITY_OPTIONS.find((option) => option.value === value) ?? PRIORITY_OPTIONS[0];
+};
+
 const isTaskPlaceValid = (place: TaskPlace): boolean => {
   return (
     isNonEmptyString(place.place) &&
@@ -1093,20 +1115,70 @@ export function CreateTaskForm({
                     </Grid>
                   )}
                   <Grid item xs={startTimeEnabled ? 2 : 12}>
-                    <PositiveIntField
+                    <TextField
+                      select
                       id="priority"
                       label="Priority"
-                      // FIXME(AA): The priority object is currently undefined.
-                      value={(taskRequest.priority as Record<string, number>)?.value || 0}
-                      onChange={(_ev, val) => {
-                        taskRequest.priority = { type: 'binary', value: val };
+                      fullWidth
+                      value={getPriorityValue(taskRequest.priority)}
+                      SelectProps={{
+                        renderValue: (selected) => {
+                          const option = getPriorityOption(Number(selected));
+                          return (
+                            <span
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: PRIORITY_LABEL_GAP,
+                              }}
+                            >
+                              <span
+                                style={{
+                                  width: PRIORITY_DOT_SIZE,
+                                  height: PRIORITY_DOT_SIZE,
+                                  borderRadius: '50%',
+                                  backgroundColor: option.color,
+                                  display: 'inline-block',
+                                }}
+                              />
+                              {option.label}
+                            </span>
+                          );
+                        },
+                      }}
+                      onChange={(ev) => {
+                        const value = Number(ev.target.value);
+                        taskRequest.priority = { type: 'binary', value };
                         setFavoriteTaskBuffer({
                           ...favoriteTaskBuffer,
-                          priority: { type: 'binary', value: val },
+                          priority: { type: 'binary', value },
                         });
                         updateTasks();
                       }}
-                    />
+                    >
+                      {PRIORITY_OPTIONS.map((option) => (
+                        <MenuItem key={option.value} value={option.value}>
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: PRIORITY_LABEL_GAP,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: PRIORITY_DOT_SIZE,
+                                height: PRIORITY_DOT_SIZE,
+                                borderRadius: '50%',
+                                backgroundColor: option.color,
+                                display: 'inline-block',
+                              }}
+                            />
+                            {option.label}
+                          </span>
+                        </MenuItem>
+                      ))}
+                    </TextField>
                   </Grid>
                   <Grid item xs={12}>
                     <FormControlLabel
