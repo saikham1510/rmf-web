@@ -746,7 +746,7 @@ export function CreateTaskForm({
     days: [true, true, true, true, true, true, true],
     until: undefined,
     at: new Date(),
-    recurring: true,
+    recurring: false,
   };
 
   const [openFavoriteDialog, setOpenFavoriteDialog] = React.useState(false);
