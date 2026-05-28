@@ -10,7 +10,6 @@ import {
   Autocomplete,
   Button,
   Checkbox,
-  Tooltip,
   Chip,
   Dialog,
   DialogActions,
@@ -36,8 +35,7 @@ import {
   Typography,
   useTheme,
 } from '@mui/material';
-import { DatePicker, TimePicker, DateTimePicker } from '@mui/x-date-pickers';
-import InfoOutlined from '@mui/icons-material/InfoOutlined';
+import { DatePicker, TimePicker } from '@mui/x-date-pickers';
 import type { TaskFavoritePydantic as TaskFavorite, TaskRequest } from 'api-client';
 import React from 'react';
 import { Loading } from '..';
@@ -74,9 +72,6 @@ type TaskDescription = DeliveryTaskDescription | PatrolTaskDescription | CleanTa
 
 const isNonEmptyString = (value: string): boolean => value.length > 0;
 const isPositiveNumber = (value: number): boolean => value > 0;
-
-const CRITICAL_LABEL = 'critical=true';
-const LEGACY_PREEMPT_LABEL = 'preempt=interrupt';
 
 const PRIORITY_OPTIONS = [
   { label: 'Normal', value: 0, color: '#42A5F5' },
@@ -127,16 +122,6 @@ const isPatrolTaskDescriptionValid = (taskDescription: PatrolTaskDescription): b
 
 const isCleanTaskDescriptionValid = (taskDescription: CleanTaskDescription): boolean => {
   return taskDescription.zone.length !== 0;
-};
-
-const hasCriticalLabel = (labels?: string[] | null): boolean => {
-  if (!labels) {
-    return false;
-  }
-  return labels.some(
-    (label) =>
-      label.toLowerCase() === CRITICAL_LABEL || label.toLowerCase() === LEGACY_PREEMPT_LABEL,
-  );
 };
 
 const classes = {
@@ -803,8 +788,6 @@ export function CreateTaskForm({
   };
   // schedule is not supported with batch upload
   const scheduleEnabled = !immediateMode && taskRequests.length === 1;
-  const startTimeEnabled = !immediateMode && taskRequest.category === 'clean';
-
   const updateTasks = () => {
     setTaskRequests((prev) => {
       prev.splice(selectedTaskIdx, 1, taskRequest);
@@ -816,18 +799,6 @@ export function CreateTaskForm({
     taskRequest.category = newCategory;
     taskRequest.description = newDesc;
     setFavoriteTaskBuffer({ ...favoriteTaskBuffer, description: newDesc, category: newCategory });
-    updateTasks();
-  };
-
-  const setTaskCritical = (enabled: boolean) => {
-    const labels = (taskRequest.labels ?? []).filter(
-      (label) =>
-        label.toLowerCase() !== CRITICAL_LABEL && label.toLowerCase() !== LEGACY_PREEMPT_LABEL,
-    );
-    if (enabled) {
-      labels.push(CRITICAL_LABEL);
-    }
-    taskRequest.labels = labels.length > 0 ? labels : undefined;
     updateTasks();
   };
 
@@ -1070,7 +1041,7 @@ export function CreateTaskForm({
                 />
               )}
 
-              <Grid>
+              <Grid item xs sx={{ minWidth: 0 }}>
                 <Grid container spacing={theme.spacing(2)}>
                   <Grid item xs={12}>
                     <TextField
@@ -1088,33 +1059,7 @@ export function CreateTaskForm({
                       <MenuItem value="delivery">Delivery</MenuItem>
                     </TextField>
                   </Grid>
-                  {startTimeEnabled && (
-                    <Grid item xs={10}>
-                      <DateTimePicker
-                        inputFormat={'MM/dd/yyyy HH:mm'}
-                        minutesStep={1}
-                        value={
-                          taskRequest.unix_millis_earliest_start_time
-                            ? new Date(taskRequest.unix_millis_earliest_start_time)
-                            : new Date()
-                        }
-                        onChange={(date) => {
-                          if (!date) {
-                            return;
-                          }
-                          taskRequest.unix_millis_earliest_start_time = date.valueOf();
-                          setFavoriteTaskBuffer({
-                            ...favoriteTaskBuffer,
-                            unix_millis_earliest_start_time: date.valueOf(),
-                          });
-                          updateTasks();
-                        }}
-                        label="Start Time"
-                        renderInput={(props) => <TextField {...props} />}
-                      />
-                    </Grid>
-                  )}
-                  <Grid item xs={startTimeEnabled ? 2 : 12}>
+                  <Grid item xs={12}>
                     <TextField
                       select
                       id="priority"
@@ -1179,28 +1124,6 @@ export function CreateTaskForm({
                         </MenuItem>
                       ))}
                     </TextField>
-                  </Grid>
-                  <Grid item xs={12}>
-                    <FormControlLabel
-                      control={
-                        <Checkbox
-                          checked={hasCriticalLabel(taskRequest.labels)}
-                          onChange={(ev) => setTaskCritical(ev.target.checked)}
-                        />
-                      }
-                      label={
-                        <span>
-                          Critical task (interrupt current task on selected robot){' '}
-                          <Tooltip
-                            title={
-                              'Immediate: dispatch-now tasks preempt currently active tasks. Scheduled: label ensures the run will preempt only when it is actually dispatched at its scheduled start.'
-                            }
-                          >
-                            <InfoOutlined fontSize="small" />
-                          </Tooltip>
-                        </span>
-                      }
-                    />
                   </Grid>
                 </Grid>
                 <Divider
@@ -1390,7 +1313,7 @@ export function CreateTaskForm({
                   <Checkbox
                     checked={schedule.recurring}
                     disabled={!scheduleEnabled}
-                    onChange={(event) =>
+                    onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
                       setSchedule((prev) => ({ ...prev, recurring: event.target.checked }))
                     }
                   />
