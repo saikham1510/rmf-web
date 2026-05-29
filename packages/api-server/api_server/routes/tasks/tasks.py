@@ -39,6 +39,20 @@ PRIORITY_LABEL_VALUES = {
 def _use_sim_time() -> bool:
     raw = os.environ.get("RMF_SERVER_USE_SIM_TIME")
     if not raw:
+        node = ros_node()
+        if node is None:
+            return False
+        try:
+            clock = node.get_clock()
+            if hasattr(clock, "ros_time_is_active"):
+                return bool(clock.ros_time_is_active)
+        except Exception:
+            logger.debug("failed to read ros_time_is_active", exc_info=True)
+        try:
+            param = node.get_parameter("use_sim_time")
+            return bool(getattr(param, "value", False))
+        except Exception:
+            logger.debug("failed to read use_sim_time parameter", exc_info=True)
         return False
     return raw.lower() not in ("0", "false")
 
