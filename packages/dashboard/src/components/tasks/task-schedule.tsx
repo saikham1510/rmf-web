@@ -409,19 +409,6 @@ export const TaskSchedule = () => {
 
   return (
     <>
-      <Button
-        variant="contained"
-        sx={{ mb: 2 }}
-        onClick={() => {
-          setIsEditingSchedule(false);
-          setCurrentScheduledTask(undefined);
-          setScheduleToEdit(undefined);
-          setOpenCreateTaskForm(true);
-        }}
-      >
-        Add Schedule
-      </Button>
-
       <input
         ref={uploadFileInputRef}
         type="file"

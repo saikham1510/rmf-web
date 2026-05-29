@@ -1,8 +1,10 @@
 import asyncio
 import json
+import re
 import threading
 import time as pytime
 import traceback
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -17,6 +19,7 @@ from api_server.dependencies import pagination_query
 from api_server.fast_io import FastIORouter
 from api_server.logger import logger
 from api_server.models import (
+    CancelTaskRequest,
     DispatchTaskRequest,
     LoopSummary,
     Pagination,
@@ -24,22 +27,267 @@ from api_server.models import (
     ScheduledTaskSchedule,
     ScheduleRun,
     TaskRequest,
+    TaskStatus,
     User,
 )
 from api_server.models import tortoise_models as ttm
 from api_server.models.labels import Labels
 from api_server.repositories import TaskRepository
+from api_server.rmf_io import tasks_service
 from api_server.utils.schedule_utils import (
     _occurrence_allowed,
     compute_next_run,
     should_skip_due_to_planned_end,
 )
-from api_server.utils.time_utils import now_wall_millis, wall_millis_to_datetime
+from api_server.utils.time_utils import (
+    datetime_to_wall_millis,
+    now_wall_millis,
+    wall_millis_to_datetime,
+)
 
 from .tasks import post_dispatch_task
 
 router = FastIORouter(tags=["Tasks"])
 INTERNAL_USER = User(username="__rmf_internal__", is_admin=True)
+
+ACTIVE_SCHEDULED_TASK_STATUSES = {
+    TaskStatus.queued,
+    TaskStatus.standby,
+    TaskStatus.underway,
+    TaskStatus.delayed,
+    TaskStatus.blocked,
+}
+
+
+def _dedupe_labels(labels: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for label in labels:
+        if label in seen:
+            continue
+        seen.add(label)
+        deduped.append(label)
+    return deduped
+
+
+def _task_state_is_active(task_state) -> bool:
+    return (
+        task_state.status in ACTIVE_SCHEDULED_TASK_STATUSES
+        and task_state.unix_millis_finish_time is None
+    )
+
+
+async def _schedule_has_active_tasks(
+    schedule_id: int,
+    task_repo: TaskRepository,
+) -> bool:
+    label = Labels.from_strings([f"scheduled_schedule_id={schedule_id}"])
+    task_states = await task_repo.query_task_states(label=label)
+    return any(_task_state_is_active(task_state) for task_state in task_states)
+
+
+async def _has_chained_child_for_parent(
+    schedule_id: int,
+    parent_task_id: str,
+    task_repo: TaskRepository,
+) -> bool:
+    # We require both labels to avoid collisions across different schedules.
+    label = Labels.from_strings(
+        [
+            f"scheduled_schedule_id={schedule_id}",
+            f"chain_parent_task_id={parent_task_id}",
+        ]
+    )
+    task_states = await task_repo.query_task_states(label=label)
+    return len(task_states) > 0
+
+
+def _parse_task_request_dict(raw_task_request) -> dict:
+    if isinstance(raw_task_request, dict):
+        return dict(raw_task_request)
+    if isinstance(raw_task_request, str):
+        try:
+            decoded = json.loads(raw_task_request)
+            if isinstance(decoded, dict):
+                return decoded
+        except Exception:
+            pass
+    logger.error(
+        "task_request is not a dict or JSON string: %s", type(raw_task_request)
+    )
+    raise HTTPException(500)
+
+
+def _build_request_for_schedule_dispatch(
+    schedule_row: ttm.ScheduledTaskSchedule,
+    *,
+    chain_parent_task_id: str | None = None,
+) -> TaskRequest:
+    parent_task = schedule_row.scheduled_task
+    if parent_task is None:
+        raise HTTPException(500)
+
+    task_request_data = _parse_task_request_dict(parent_task.task_request)
+
+    # Scheduled patrols are intentionally dispatched one loop at a time.
+    if task_request_data.get("category") == "patrol" and isinstance(
+        task_request_data.get("description"), dict
+    ):
+        task_request_data = {
+            **task_request_data,
+            "description": {
+                **task_request_data["description"],
+                "rounds": 1,
+            },
+        }
+
+    labels = list(task_request_data.get("labels") or [])
+    labels.append(f"scheduled_task_id={parent_task.id}")
+    labels.append(f"scheduled_schedule_id={schedule_row.get_id()}")
+    if chain_parent_task_id is not None:
+        labels.append(f"chain_parent_task_id={chain_parent_task_id}")
+    task_request_data["labels"] = _dedupe_labels(labels)
+
+    task_request = TaskRequest(**task_request_data)
+    # Set a meaningful earliest-start time to avoid RMF interpreting 0 as epoch.
+    # For regular scheduled dispatches use the schedule's authoritative start time;
+    # for chained (immediate) runs use current time so RMF shows a sensible timestamp.
+    if chain_parent_task_id is None:
+        scheduled_start = schedule_row.next_run_at or schedule_row.start_from
+        if scheduled_start is not None:
+            task_request.unix_millis_earliest_start_time = datetime_to_wall_millis(
+                scheduled_start
+            )
+        else:
+            task_request.unix_millis_earliest_start_time = now_wall_millis()
+    else:
+        task_request.unix_millis_earliest_start_time = now_wall_millis()
+
+    task_request.unix_millis_request_time = now_wall_millis()
+    return task_request
+
+
+async def _dispatch_schedule_task_request(
+    schedule_row: ttm.ScheduledTaskSchedule,
+    task_repo: TaskRepository,
+    *,
+    chain_parent_task_id: str | None = None,
+) -> None:
+    parent_task = schedule_row.scheduled_task
+    if parent_task is None:
+        logger.warning(
+            "scheduled task schedule_id=%s is missing its parent task",
+            schedule_row.get_id(),
+        )
+        return
+
+    task_request = _build_request_for_schedule_dispatch(
+        schedule_row,
+        chain_parent_task_id=chain_parent_task_id,
+    )
+    dispatch_request = DispatchTaskRequest(
+        type="dispatch_task_request",
+        request=task_request,
+    )
+    logger.info(
+        "dispatching scheduled task schedule_id=%s task_id=%s",
+        schedule_row.get_id(),
+        parent_task.id,
+    )
+    await post_dispatch_task(dispatch_request, task_repo)
+    parent_task.last_ran = wall_millis_to_datetime(now_wall_millis())
+    await parent_task.save(update_fields=["last_ran"])
+    logger.info(
+        "finished dispatching scheduled task schedule_id=%s task_id=%s",
+        schedule_row.get_id(),
+        parent_task.id,
+    )
+
+
+async def try_dispatch_chained_schedule_run(
+    schedule_row: ttm.ScheduledTaskSchedule,
+    task_repo: TaskRepository,
+    *,
+    completed_task_id: str,
+    allowed_categories: set[str],
+) -> bool:
+    """Try to chain one immediate run after a completion event.
+
+    Returns True if a chained run was dispatched, otherwise False.
+    """
+    parent_task = schedule_row.scheduled_task
+    if parent_task is None:
+        logger.warning(
+            "chain: schedule_id=%s has no parent task",
+            schedule_row.get_id(),
+        )
+        return False
+
+    task_request_data = _parse_task_request_dict(parent_task.task_request)
+    category = task_request_data.get("category")
+    if category not in allowed_categories:
+        logger.info(
+            "chain: schedule_id=%s skip category=%s not in allowed set",
+            schedule_row.get_id(),
+            category,
+        )
+        return False
+
+    now_utc = datetime.now(timezone.utc)
+    if should_skip_due_to_planned_end(schedule_row, now_utc):
+        logger.info(
+            "chain: schedule_id=%s stop due to planned_end_at=%s",
+            schedule_row.get_id(),
+            schedule_row.planned_end_at,
+        )
+        return False
+
+    if not _occurrence_allowed(schedule_row, now_utc, parent_task):
+        logger.info(
+            "chain: schedule_id=%s stop due to bounds (until/except_dates)",
+            schedule_row.get_id(),
+        )
+        return False
+
+    # If the next scheduled occurrence is still in the future, do not chain
+    # another run yet. This keeps scheduled work aligned to its actual window
+    # instead of re-dispatching immediately after the previous task completes.
+    next_run_at = schedule_row.next_run_at or schedule_row.start_from
+    if next_run_at is not None:
+        next_run = _ensure_utc_aware(next_run_at)
+        if next_run > now_utc:
+            logger.info(
+                "chain: schedule_id=%s wait until next run at %s",
+                schedule_row.get_id(),
+                next_run.isoformat(),
+            )
+            return False
+
+    if await _schedule_has_active_tasks(schedule_row.get_id(), task_repo):
+        logger.info(
+            "chain: schedule_id=%s skip because another run is still active",
+            schedule_row.get_id(),
+        )
+        return False
+
+    if await _has_chained_child_for_parent(
+        schedule_row.get_id(),
+        completed_task_id,
+        task_repo,
+    ):
+        logger.info(
+            "chain: schedule_id=%s skip duplicate completion booking_id=%s",
+            schedule_row.get_id(),
+            completed_task_id,
+        )
+        return False
+
+    await _dispatch_schedule_task_request(
+        schedule_row,
+        task_repo,
+        chain_parent_task_id=completed_task_id,
+    )
+    return True
 
 
 def normalize_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
@@ -54,6 +302,67 @@ def _ensure_utc_aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _parse_at_time(at: Optional[str]) -> Optional[tuple[int, int]]:
+    if not at:
+        return None
+    m = re.match(r"^(\d{1,2}):(\d{2})$", at)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _matches_schedule_start(
+    schedule_row: ttm.ScheduledTaskSchedule,
+    candidate_dt_utc: datetime,
+) -> bool:
+    at = _parse_at_time(schedule_row.at)
+    if at is None:
+        return False
+
+    local_tz = datetime.now().astimezone().tzinfo
+    local_dt = candidate_dt_utc.astimezone(local_tz)
+    if (local_dt.hour, local_dt.minute) != at:
+        return False
+
+    period = schedule_row.period
+    weekday_map = {
+        ttm.ScheduledTaskSchedule.Period.Monday: 0,
+        ttm.ScheduledTaskSchedule.Period.Tuesday: 1,
+        ttm.ScheduledTaskSchedule.Period.Wednesday: 2,
+        ttm.ScheduledTaskSchedule.Period.Thursday: 3,
+        ttm.ScheduledTaskSchedule.Period.Friday: 4,
+        ttm.ScheduledTaskSchedule.Period.Saturday: 5,
+        ttm.ScheduledTaskSchedule.Period.Sunday: 6,
+    }
+
+    if period == ttm.ScheduledTaskSchedule.Period.Day:
+        return True
+    if period in weekday_map:
+        return local_dt.weekday() == weekday_map[period]
+    return False
+
+
+def _normalize_start_from(
+    start_from: Optional[datetime],
+    at: Optional[str],
+) -> Optional[datetime]:
+    if start_from is None or at is None:
+        return start_from
+    at_time = _parse_at_time(at)
+    if at_time is None:
+        return start_from
+
+    local_tz = datetime.now().astimezone().tzinfo
+    local_dt = _ensure_utc_aware(start_from).astimezone(local_tz)
+    local_dt = local_dt.replace(
+        hour=at_time[0],
+        minute=at_time[1],
+        second=0,
+        microsecond=0,
+    )
+    return local_dt.astimezone(timezone.utc)
 
 
 def validate_schedules(schedules: list[ScheduledTaskSchedule]) -> None:
@@ -92,9 +401,14 @@ async def _create_schedule_with_next_run(
     if schedule_request.start_from is None:
         raise HTTPException(422, "start_from is required for scheduled tasks")
 
+    normalized_start_from = _normalize_start_from(
+        schedule_request.start_from,
+        schedule_request.at,
+    )
+
     sche = await ttm.ScheduledTaskSchedule.create(
         scheduled_task=parent_task,
-        start_from=normalize_to_utc(schedule_request.start_from),
+        start_from=normalize_to_utc(normalized_start_from),
         until=normalize_to_utc(schedule_request.until),
         planned_end_at=schedule_request.planned_end_at,
         at=schedule_request.at,
@@ -103,15 +417,30 @@ async def _create_schedule_with_next_run(
         dispatched=False,
     )
 
-    after_dt = normalize_to_utc(schedule_request.start_from) or datetime.now(
-        timezone.utc
-    )
+    after_dt = normalize_to_utc(normalized_start_from) or datetime.now(timezone.utc)
     next_run = compute_next_run(sche, after_dt)
+    if normalized_start_from is not None:
+        start_dt = normalize_to_utc(normalized_start_from)
+        if start_dt is not None and _matches_schedule_start(sche, start_dt):
+            if _occurrence_allowed(sche, start_dt, parent_task):
+                if next_run is None or next_run > start_dt:
+                    next_run = start_dt
     if next_run is None:
         raise HTTPException(422, "Task is never going to run")
 
-    sche.start_from = next_run
-    await sche.save(update_fields=["start_from"])
+    sche.next_run_at = next_run
+    await sche.save(update_fields=["next_run_at"])
+    logger.info(
+        "scheduled task created schedule_id=%s parent_task_id=%s start_from=%s next_run_at=%s until=%s planned_end_at=%s period=%s at=%s",
+        sche.get_id(),
+        parent_task.id,
+        sche.start_from,
+        sche.next_run_at,
+        sche.until,
+        sche.planned_end_at,
+        sche.period,
+        sche.at,
+    )
     return sche
 
 
@@ -134,6 +463,88 @@ async def schedule_task(task: ttm.ScheduledTask, task_repo: TaskRepository):
         return
 
 
+async def _cancel_overdue_schedule_tasks(
+    schedule_row: ttm.ScheduledTaskSchedule,
+    task_repo: TaskRepository,
+    now_utc: datetime,
+) -> None:
+    """Cancel live tasks once their schedule has passed the planned end time.
+
+    We only target tasks that are still in a live status, so finished work stays
+    untouched.
+    """
+    if schedule_row.scheduled_task is None:
+        return
+
+    schedule_id = schedule_row.get_id()
+    label = Labels.from_strings([f"scheduled_schedule_id={schedule_id}"])
+    task_states = await task_repo.query_task_states(label=label)
+
+    for task_state in task_states:
+        await cancel_active_scheduled_task_if_overdue(
+            schedule_row,
+            task_state,
+            task_repo,
+            now_utc,
+        )
+
+
+async def cancel_active_scheduled_task_if_overdue(
+    schedule_row: ttm.ScheduledTaskSchedule,
+    task_state,
+    task_repo: TaskRepository,
+    now_utc: datetime,
+) -> bool:
+    """Cancel a live scheduled task if the schedule window has already closed."""
+    if schedule_row.scheduled_task is None:
+        return False
+
+    if task_state.status not in ACTIVE_SCHEDULED_TASK_STATUSES:
+        return False
+    if task_state.unix_millis_finish_time is not None:
+        return False
+
+    task_start_utc = None
+    if task_state.unix_millis_start_time is not None:
+        task_start_utc = datetime.fromtimestamp(
+            task_state.unix_millis_start_time / 1000,
+            tz=timezone.utc,
+        )
+
+    if not should_skip_due_to_planned_end(
+        schedule_row,
+        now_utc,
+        candidate_dt_utc=task_start_utc,
+    ):
+        return False
+
+    schedule_id = schedule_row.get_id()
+    cancel_request = CancelTaskRequest(
+        type="cancel_task_request",
+        task_id=task_state.booking.id,
+        labels=[
+            f"scheduled_schedule_id={schedule_id}",
+            "scheduled_end_time_auto_cancel",
+        ],
+    )
+    try:
+        logger.info(
+            "canceling active scheduled task schedule_id=%s task_id=%s status=%s",
+            schedule_id,
+            task_state.booking.id,
+            task_state.status,
+        )
+        await tasks_service().call(cancel_request.model_dump_json(exclude_none=True))
+        return True
+    except Exception:
+        logger.exception(
+            "failed to cancel scheduled task schedule_id=%s task_id=%s",
+            schedule_id,
+            task_state.booking.id,
+        )
+        return False
+
+
 async def _dispatch_scheduled_schedule(schedule_id: int):
     schedule_row = await ttm.ScheduledTaskSchedule.get_or_none(
         _id=schedule_id
@@ -142,86 +553,38 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
         logger.warning("scheduled task schedule_id=%s no longer exists", schedule_id)
         return
 
-    task = schedule_row.scheduled_task
-    if task is None:
-        logger.warning(
-            "scheduled task schedule_id=%s is missing its parent task", schedule_id
+    schedule_start_dt = schedule_row.next_run_at or schedule_row.start_from
+    if schedule_start_dt is not None:
+        now_utc = datetime.now(timezone.utc)
+        schedule_start = _ensure_utc_aware(schedule_start_dt)
+        logger.info(
+            "schedule_id=%s dispatch check next_run_at=%s now=%s",
+            schedule_id,
+            schedule_start.isoformat(),
+            now_utc.isoformat(),
         )
+        if schedule_start > now_utc:
+            logger.warning(
+                "schedule_id=%s dispatch requested before next_run_at=%s (now=%s); deferring",
+                schedule_id,
+                schedule_start.isoformat(),
+                now_utc.isoformat(),
+            )
+            await ttm.ScheduledTaskSchedule.filter(_id=schedule_id).update(
+                dispatched=False
+            )
+            return
+    else:
+        logger.warning(
+            "schedule_id=%s dispatch requested without next_run_at/start_from; deferring",
+            schedule_id,
+        )
+        await ttm.ScheduledTaskSchedule.filter(_id=schedule_id).update(dispatched=False)
         return
 
-    if not isinstance(task.task_request, dict):
-        try:
-            task_request_data = json.loads(task.task_request)
-        except Exception as e:
-            logger.error(
-                "task_request is not a dict or JSON string: %s", type(task.task_request)
-            )
-            raise HTTPException(500) from e
-    else:
-        task_request_data = task.task_request
-
-    # Scheduled patrols are dispatched one loop at a time so recurrence bounds
-    # (planned end / until) can control when to stop.
-    if (
-        isinstance(task_request_data, dict)
-        and task_request_data.get("category") == "patrol"
-        and isinstance(task_request_data.get("description"), dict)
-    ):
-        task_request_data = {
-            **task_request_data,
-            "description": {
-                **task_request_data["description"],
-                "rounds": 1,
-            },
-        }
-
-    # Attach schedule context labels so downstream consumers (e.g. completion
-    # chaining) can correlate a dispatched task back to its schedule. Labels are
-    # optional in the schema, so create/extend as needed.
-    try:
-        if isinstance(task_request_data, dict):
-            labels = list(task_request_data.get("labels") or [])
-            # Mark which scheduled_task and schedule row produced this dispatch
-            if schedule_row is not None and getattr(
-                schedule_row, "scheduled_task", None
-            ):
-                labels.append(f"scheduled_task_id={schedule_row.scheduled_task.id}")
-            labels.append(f"scheduled_schedule_id={schedule_id}")
-            # De-duplicate while preserving order
-            seen = set()
-            deduped = []
-            for x in labels:
-                if x in seen:
-                    continue
-                seen.add(x)
-                deduped.append(x)
-            task_request_data["labels"] = deduped
-    except Exception:
-        # Non-fatal: labels are just hints
-        logger.exception("failed to attach schedule labels to task_request")
-
-    task_request = TaskRequest(**task_request_data)
-    # The scheduled trigger time is authoritative; dispatch immediately when the
-    # schedule fires.
-    task_request.unix_millis_earliest_start_time = 0
-    task_request.unix_millis_request_time = now_wall_millis()
-
-    dispatch_request = DispatchTaskRequest(
-        type="dispatch_task_request",
-        request=task_request,
-    )
-    logger.info(
-        "dispatching scheduled task schedule_id=%s task_id=%s",
-        schedule_id,
-        task.id,
-    )
-    await post_dispatch_task(dispatch_request, TaskRepository(INTERNAL_USER))
-    task.last_ran = wall_millis_to_datetime(now_wall_millis())
-    await task.save(update_fields=["last_ran"])
-    logger.info(
-        "finished dispatching scheduled task schedule_id=%s task_id=%s",
-        schedule_id,
-        task.id,
+    await _dispatch_schedule_task_request(
+        schedule_row,
+        TaskRepository(INTERNAL_USER),
     )
     # After dispatch, compute the next occurrence and persist it (DB-driven recurrence)
     try:
@@ -234,10 +597,10 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
                 schedule_id,
             )
             return
-        # Otherwise, update start_from and clear dispatched so scheduler can pick it up later
-        schedule_row.start_from = next_run
+        # Otherwise, update next_run_at and clear dispatched so scheduler can pick it up later
+        schedule_row.next_run_at = next_run
         schedule_row.dispatched = False
-        await schedule_row.save(update_fields=["start_from", "dispatched"])
+        await schedule_row.save(update_fields=["next_run_at", "dispatched"])
         logger.info(
             "schedule_id=%s next_run updated to %s",
             schedule_id,
@@ -251,11 +614,23 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
 
 async def scheduler_loop(poll_interval: float = 1.0):
     logger.info("UTC scheduler loop started poll_interval=%s", poll_interval)
+    task_repo = TaskRepository(INTERNAL_USER)
     while True:
         try:
             now = datetime.now(timezone.utc)
             logger.info("SCHEDULER TICK now=%s tzinfo=%s", now.isoformat(), now.tzinfo)
             logger.info("NOW=%s type=%s", now, type(now))
+
+            overdue_schedules = await (
+                ttm.ScheduledTaskSchedule.filter(
+                    planned_end_at__isnull=False,
+                    start_from__isnull=False,
+                )
+                .select_related("scheduled_task")
+                .order_by("start_from", "_id")
+            )
+            for schedule_row in overdue_schedules:
+                await _cancel_overdue_schedule_tasks(schedule_row, task_repo, now)
 
             # Query candidate schedules, then do the UTC comparison in Python so the
             # scheduler remains consistent whether the DB round-trips naive or aware
@@ -263,32 +638,41 @@ async def scheduler_loop(poll_interval: float = 1.0):
             due_schedules = await (
                 ttm.ScheduledTaskSchedule.filter(
                     dispatched=False,
-                    start_from__isnull=False,
                 )
                 .select_related("scheduled_task")
-                .order_by("start_from", "_id")
+                .order_by("next_run_at", "_id")
             )
             logger.info("DUE COUNT=%s", len(due_schedules))
 
             for schedule_row in due_schedules:
-                if schedule_row.start_from is None:
+                if schedule_row.next_run_at is None:
+                    next_run = compute_next_run(schedule_row, now)
+                    if next_run is None:
+                        await ttm.ScheduledTaskSchedule.filter(
+                            _id=schedule_row.get_id()
+                        ).update(dispatched=True)
+                        continue
+                    schedule_row.next_run_at = next_run
+                    await schedule_row.save(update_fields=["next_run_at"])
+
+                if schedule_row.next_run_at is None:
                     continue
 
-                schedule_start = _ensure_utc_aware(schedule_row.start_from)
+                schedule_start = _ensure_utc_aware(schedule_row.next_run_at)
 
                 logger.info(
-                    "DB start_from=%s type=%s tz=%s",
-                    schedule_row.start_from,
-                    type(schedule_row.start_from),
-                    getattr(schedule_row.start_from, "tzinfo", None),
+                    "DB next_run_at=%s type=%s tz=%s",
+                    schedule_row.next_run_at,
+                    type(schedule_row.next_run_at),
+                    getattr(schedule_row.next_run_at, "tzinfo", None),
                 )
 
                 # Defensive tzinfo check: treat naive DB datetimes as UTC but log.
-                if schedule_row.start_from.tzinfo is None:
+                if schedule_row.next_run_at.tzinfo is None:
                     logger.warning(
-                        "schedule_id=%s has naive start_from, treating as UTC: %s",
+                        "schedule_id=%s has naive next_run_at, treating as UTC: %s",
                         schedule_row.get_id(),
-                        schedule_row.start_from,
+                        schedule_row.next_run_at,
                     )
 
                 if schedule_start > now:
@@ -324,7 +708,7 @@ async def scheduler_loop(poll_interval: float = 1.0):
                     continue
 
                 logger.info(
-                    "FOUND DUE TASK schedule_id=%s task_id=%s start_from=%s start_from_tz=%s now=%s now_tz=%s",
+                    "FOUND DUE TASK schedule_id=%s task_id=%s next_run_at=%s next_run_tz=%s now=%s now_tz=%s",
                     schedule_row.get_id(),
                     getattr(schedule_row.scheduled_task, "id", None),
                     schedule_start.isoformat(),
@@ -347,11 +731,11 @@ async def scheduler_loop(poll_interval: float = 1.0):
                     continue
 
                 logger.info(
-                    "scheduler triggered schedule_id=%s task_id=%s start_from=%s now=%s",
+                    "scheduler triggered schedule_id=%s task_id=%s next_run_at=%s now=%s",
                     schedule_id,
                     getattr(schedule_row.scheduled_task, "id", None),
-                    schedule_row.start_from.isoformat()
-                    if schedule_row.start_from is not None
+                    schedule_row.next_run_at.isoformat()
+                    if schedule_row.next_run_at is not None
                     else None,
                     now.isoformat(),
                 )
@@ -406,6 +790,16 @@ async def post_scheduled_task(
     # Validate schedules BEFORE entering transaction to avoid rollback on validation failure
     validate_schedules(scheduled_task_request.schedules)
 
+    if scheduled_task_request.schedules:
+        first = scheduled_task_request.schedules[0]
+        logger.info(
+            "scheduled_task create requester=%s start_from=%s at=%s period=%s",
+            scheduled_task_request.task_request.requester,
+            getattr(first.start_from, "isoformat", lambda: None)(),
+            first.at,
+            first.period,
+        )
+
     try:
         task_repo = TaskRepository(user)
         async with tortoise.transactions.in_transaction():
@@ -442,6 +836,14 @@ async def get_scheduled_tasks(
     ),
     pagination: Pagination = Depends(pagination_query),
 ):
+    logger.info(
+        "scheduled task calendar query start_before=%s until_after=%s limit=%s offset=%s order_by=%s",
+        start_before,
+        until_after,
+        pagination.limit,
+        pagination.offset,
+        pagination.order_by,
+    )
     q = (
         ttm.ScheduledTask.filter(
             Q(schedules__start_from__lte=start_before)
@@ -457,6 +859,7 @@ async def get_scheduled_tasks(
         q.order_by(*pagination.order_by)
     results = await q
     await ttm.ScheduledTask.fetch_for_list(results)
+    logger.info("scheduled task calendar query returned %s tasks", len(results))
     return [ScheduledTask.model_validate(x) for x in results]
 
 
