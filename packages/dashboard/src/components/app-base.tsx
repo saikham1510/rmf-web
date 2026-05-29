@@ -6,27 +6,57 @@ import {
   GlobalStyles,
   Grid,
   Snackbar,
+  Box,
 } from '@mui/material';
 import { ThemeProvider } from '@mui/material/styles';
 import React from 'react';
 import { rmfDark, rmfDarkLeaflet, rmfLight, AlertDialog } from 'react-components';
 import { loadSettings, saveSettings, Settings, ThemeMode } from '../settings';
 import { AppController, AppControllerContext, SettingsContext } from './app-contexts';
+import { AppEvents } from './app-events';
 import AppBar from './appbar';
 import { AlertStore } from './alert-store';
-
+import { CriticalAlert, CriticalAlertProps } from './critical-alert';
+import { SxProps, Theme } from '@mui/material/styles';
+import type { CSSObject } from '@mui/material/styles';
 const DefaultAlertDuration = 2000;
 const defaultTheme = createTheme();
+
+interface SemanticAlert {
+  id: string;
+  message: string;
+  category: string;
+  severity: string;
+  source_type: string;
+  timestamp: number;
+  dedup_key?: string;
+  robot_name?: string;
+  nearest_waypoint?: string;
+  x?: number;
+  y?: number;
+}
 
 /**
  * Contains various components that are essential to the app and provides contexts to control them.
  * Components include:
  *
  * - Settings
- * - Alerts
+ * - Alerts (temporary Snackbar + persistent critical alerts)
  *
  * Also provides `AppControllerContext` to allow children components to control them.
  */
+
+const alertStackSx: React.CSSProperties = {
+  position: 'fixed',
+  bottom: '20px',
+  right: '20px',
+  zIndex: 9990,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 2,
+  pointerEvents: 'none',
+};
+
 export function AppBase({ children }: React.PropsWithChildren<{}>): JSX.Element | null {
   const [settings, setSettings] = React.useState(() => loadSettings());
   const [showAlert, setShowAlert] = React.useState(false);
@@ -35,6 +65,7 @@ export function AppBase({ children }: React.PropsWithChildren<{}>): JSX.Element 
   const [alertMessage, setAlertMessage] = React.useState('');
   const [alertDuration, setAlertDuration] = React.useState(DefaultAlertDuration);
   const [extraAppbarIcons, setExtraAppbarIcons] = React.useState<React.ReactNode>(null);
+  const [criticalAlerts, setCriticalAlerts] = React.useState<Record<string, SemanticAlert>>({});
 
   const theme = React.useMemo(() => {
     switch (settings.themeMode) {
@@ -66,6 +97,24 @@ export function AppBase({ children }: React.PropsWithChildren<{}>): JSX.Element 
     [updateSettings],
   );
 
+  // Subscribe to critical alert updates
+  React.useEffect(() => {
+    const subs = [
+      AppEvents.criticalAlertListUpdated.subscribe((alerts) => {
+        setCriticalAlerts(alerts);
+      }),
+      AppEvents.removeCriticalAlert.subscribe((alertId) => {
+        setCriticalAlerts((prev) => {
+          const updated = { ...prev };
+          delete updated[alertId];
+          return updated;
+        });
+      }),
+    ];
+
+    return () => subs.forEach((sub) => sub.unsubscribe());
+  }, []);
+
   React.useEffect(() => {
     const checkSize = () => {
       if (window.innerHeight < 1080 || window.innerWidth < 1080) {
@@ -79,6 +128,17 @@ export function AppBase({ children }: React.PropsWithChildren<{}>): JSX.Element 
   const dismissDisplayAlert = () => {
     setLowResolutionAlert(false);
   };
+
+  const handleAcknowledgeCriticalAlert = (id: string) => {
+    setCriticalAlerts((prev) => {
+      const updated = { ...prev };
+      delete updated[id];
+      return updated;
+    });
+  };
+  const alertsList: SemanticAlert[] = React.useMemo(() => {
+    return Object.values(criticalAlerts);
+  }, [criticalAlerts]);
 
   const lowResolutionDisplayAlert = () => {
     return (
@@ -108,6 +168,36 @@ export function AppBase({ children }: React.PropsWithChildren<{}>): JSX.Element 
     );
   };
 
+  // Render critical alert stack - positioned at bottom-right
+
+  const criticalAlertStack = (): JSX.Element | null => {
+    const alerts: SemanticAlert[] = Object.values(criticalAlerts) as SemanticAlert[];
+
+    if (alerts.length === 0) {
+      return null;
+    }
+
+    return (
+      <div style={alertStackSx}>
+        {alerts.slice(-3).map((alert: SemanticAlert) => (
+          <div key={alert.id}>
+            <CriticalAlert
+              id={alert.id}
+              message={alert.message}
+              category={alert.category}
+              severity={alert.severity}
+              timestamp={alert.timestamp}
+              robot_name={alert.robot_name}
+              nearest_waypoint={alert.nearest_waypoint}
+              x={alert.x}
+              y={alert.y}
+              onAcknowledge={handleAcknowledgeCriticalAlert}
+            />
+          </div>
+        ))}
+      </div>
+    );
+  };
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -124,6 +214,7 @@ export function AppBase({ children }: React.PropsWithChildren<{}>): JSX.Element 
           >
             <AppBar extraToolbarItems={extraAppbarIcons} />
             {children}
+            {/* Snackbar for temporary alerts */}
             {/* TODO: Support stacking of alerts */}
             <Snackbar
               open={showAlert}
@@ -139,6 +230,9 @@ export function AppBase({ children }: React.PropsWithChildren<{}>): JSX.Element 
                 {alertMessage}
               </Alert>
             </Snackbar>
+
+            {/* Critical Alert Stack - bottom-right corner */}
+            {criticalAlertStack()}
           </Grid>
         </AppControllerContext.Provider>
       </SettingsContext.Provider>

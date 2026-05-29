@@ -35,12 +35,20 @@ class AlertRepository:
         return alert_pydantic
 
     async def create_alert(
-        self, alert_id: str, category: str
+        self,
+        alert_id: str,
+        category: str,
+        severity: str = None,
+        source_type: str = None,
+        dedup_key: str = None,
     ) -> Optional[ttm.AlertPydantic]:
         alert, _ = await ttm.Alert.update_or_create(
             {
                 "original_id": alert_id,
                 "category": category,
+                "severity": severity,
+                "source_type": source_type,
+                "dedup_key": dedup_key,
                 "unix_millis_created_time": now_wall_millis(),
                 "acknowledged_by": None,
                 "unix_millis_acknowledged_time": None,
