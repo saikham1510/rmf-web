@@ -1,3 +1,4 @@
+import json
 from typing import cast
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -420,14 +421,56 @@ class TestDispatchTask(AppFixture):
                     request=mdl.TaskRequest(
                         category="test",
                         description="description",
-                        labels=["critical=true"],
+                        labels=["priority=critical"],
                     ),
                 ).model_dump_json(exclude_none=True),
             )
             self.assertEqual(200, resp.status_code, resp.content)
             mock_spawn.assert_called_once()
+            sent_payload = json.loads(
+                mock_tasks_service.return_value.call.await_args.args[0]
+            )
+            self.assertEqual(
+                {"type": "binary", "value": 2},
+                sent_payload["request"]["priority"],
+            )
         if captured["coro"] is not None:
             captured["coro"].close()
+
+    def test_urgent_priority_does_not_spawn_watcher(self):
+        task_id = str(uuid4())
+
+        with patch.object(
+            tasks_route, "tasks_service"
+        ) as mock_tasks_service, patch.object(
+            tasks_route, "_spawn_background_task"
+        ) as mock_spawn:
+            mock_tasks_service.return_value.call = AsyncMock(
+                return_value=(
+                    f'{{ "success": true, "state": {{ "booking": {{ "id": "{task_id}" }} }} }}'
+                )
+            )
+            resp = self.client.post(
+                "/tasks/dispatch_task",
+                content=mdl.DispatchTaskRequest(
+                    type="dispatch_task_request",
+                    request=mdl.TaskRequest(
+                        category="test",
+                        description="description",
+                        labels=["priority=urgent"],
+                    ),
+                ).model_dump_json(exclude_none=True),
+            )
+            self.assertEqual(200, resp.status_code, resp.content)
+            mock_spawn.assert_not_called()
+
+        sent_payload = json.loads(
+            mock_tasks_service.return_value.call.await_args.args[0]
+        )
+        self.assertEqual(
+            {"type": "binary", "value": 1},
+            sent_payload["request"]["priority"],
+        )
 
     def test_extract_assigned_robot_name_from_dispatch_assignment(self):
         task_state = mdl.TaskState.model_validate(

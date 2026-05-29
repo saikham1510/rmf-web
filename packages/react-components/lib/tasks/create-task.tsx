@@ -10,7 +10,6 @@ import {
   Autocomplete,
   Button,
   Checkbox,
-  Tooltip,
   Chip,
   Dialog,
   DialogActions,
@@ -36,8 +35,7 @@ import {
   Typography,
   useTheme,
 } from '@mui/material';
-import { DatePicker, TimePicker, DateTimePicker } from '@mui/x-date-pickers';
-import InfoOutlined from '@mui/icons-material/InfoOutlined';
+import { DatePicker, TimePicker } from '@mui/x-date-pickers';
 import type { TaskFavoritePydantic as TaskFavorite, TaskRequest } from 'api-client';
 import React from 'react';
 import { Loading } from '..';
@@ -75,8 +73,27 @@ type TaskDescription = DeliveryTaskDescription | PatrolTaskDescription | CleanTa
 const isNonEmptyString = (value: string): boolean => value.length > 0;
 const isPositiveNumber = (value: number): boolean => value > 0;
 
-const CRITICAL_LABEL = 'critical=true';
-const LEGACY_PREEMPT_LABEL = 'preempt=interrupt';
+const PRIORITY_OPTIONS = [
+  { label: 'Normal', value: 0, color: '#42A5F5' },
+  { label: 'Urgent', value: 1, color: '#FB8C00' },
+  { label: 'Critical', value: 2, color: '#E53935' },
+] as const;
+
+const PRIORITY_DOT_SIZE = 18;
+const PRIORITY_LABEL_GAP = 12;
+
+const isPriorityValue = (value: unknown): value is number => {
+  return typeof value === 'number' && PRIORITY_OPTIONS.some((option) => option.value === value);
+};
+
+const getPriorityValue = (priority: TaskRequest['priority']): number => {
+  const value = (priority as Record<string, number> | undefined)?.value;
+  return isPriorityValue(value) ? value : 0;
+};
+
+const getPriorityOption = (value: number) => {
+  return PRIORITY_OPTIONS.find((option) => option.value === value) ?? PRIORITY_OPTIONS[0];
+};
 
 const isTaskPlaceValid = (place: TaskPlace): boolean => {
   return (
@@ -105,16 +122,6 @@ const isPatrolTaskDescriptionValid = (taskDescription: PatrolTaskDescription): b
 
 const isCleanTaskDescriptionValid = (taskDescription: CleanTaskDescription): boolean => {
   return taskDescription.zone.length !== 0;
-};
-
-const hasCriticalLabel = (labels?: string[] | null): boolean => {
-  if (!labels) {
-    return false;
-  }
-  return labels.some(
-    (label) =>
-      label.toLowerCase() === CRITICAL_LABEL || label.toLowerCase() === LEGACY_PREEMPT_LABEL,
-  );
 };
 
 const classes = {
@@ -604,6 +611,7 @@ export interface Schedule {
   until?: Date;
   at: Date;
   plannedEndAt?: Date;
+  recurring: boolean;
 }
 
 enum ScheduleUntilValue {
@@ -635,22 +643,13 @@ const DaySelectorSwitch: React.VFC<DaySelectorSwitchProps> = ({ disabled, onChan
   );
   return (
     <div>
-      <TextField
-        label="Recurring Every"
-        color="primary"
-        InputProps={{
-          disabled: true,
-          startAdornment: [
-            renderChip(0, 'Mon'),
-            renderChip(1, 'Tue'),
-            renderChip(2, 'Wed'),
-            renderChip(3, 'Thu'),
-            renderChip(4, 'Fri'),
-            renderChip(5, 'Sat'),
-            renderChip(6, 'Sun'),
-          ],
-        }}
-      />
+      {renderChip(0, 'Mon')}
+      {renderChip(1, 'Tue')}
+      {renderChip(2, 'Wed')}
+      {renderChip(3, 'Thu')}
+      {renderChip(4, 'Fri')}
+      {renderChip(5, 'Sat')}
+      {renderChip(6, 'Sun')}
     </div>
   );
 };
@@ -733,6 +732,7 @@ export function CreateTaskForm({
     days: [true, true, true, true, true, true, true],
     until: undefined,
     at: new Date(),
+    recurring: false,
   };
 
   const [openFavoriteDialog, setOpenFavoriteDialog] = React.useState(false);
@@ -758,7 +758,11 @@ export function CreateTaskForm({
   const taskRequest = taskRequests[selectedTaskIdx];
   const [openSchedulingDialog, setOpenSchedulingDialog] = React.useState(false);
   const [schedule, setSchedule] = React.useState<Schedule>(
-    immediateMode ? defaultSchedule : scheduleToEdit ?? defaultSchedule,
+    immediateMode
+      ? defaultSchedule
+      : scheduleToEdit
+        ? { ...defaultSchedule, ...scheduleToEdit, recurring: scheduleToEdit.recurring ?? true }
+        : defaultSchedule,
   );
   const [scheduleUntilValue, setScheduleUntilValue] = React.useState<string>(
     immediateMode
@@ -785,8 +789,6 @@ export function CreateTaskForm({
   };
   // schedule is not supported with batch upload
   const scheduleEnabled = !immediateMode && taskRequests.length === 1;
-  const startTimeEnabled = false;
-
   const updateTasks = () => {
     setTaskRequests((prev) => {
       prev.splice(selectedTaskIdx, 1, taskRequest);
@@ -798,18 +800,6 @@ export function CreateTaskForm({
     taskRequest.category = newCategory;
     taskRequest.description = newDesc;
     setFavoriteTaskBuffer({ ...favoriteTaskBuffer, description: newDesc, category: newCategory });
-    updateTasks();
-  };
-
-  const setTaskCritical = (enabled: boolean) => {
-    const labels = (taskRequest.labels ?? []).filter(
-      (label) =>
-        label.toLowerCase() !== CRITICAL_LABEL && label.toLowerCase() !== LEGACY_PREEMPT_LABEL,
-    );
-    if (enabled) {
-      labels.push(CRITICAL_LABEL);
-    }
-    taskRequest.labels = labels.length > 0 ? labels : undefined;
     updateTasks();
   };
 
@@ -891,7 +881,7 @@ export function CreateTaskForm({
       }
     }
 
-    const submittingSchedule = !immediateMode && scheduling && scheduleEnabled;
+    const submittingSchedule = !immediateMode && scheduling && !!schedule;
     try {
       setSubmitting(true);
       await submitTasks(taskRequests, submittingSchedule ? schedule : null);
@@ -1052,105 +1042,89 @@ export function CreateTaskForm({
                 />
               )}
 
-              <Grid>
+              <Grid item xs sx={{ minWidth: 0 }}>
                 <Grid container spacing={theme.spacing(2)}>
                   <Grid item xs={12}>
                     <TextField
                       select
                       id="task-type"
-                      label="Task Category"
+                      label="Category"
                       variant="outlined"
                       fullWidth
                       margin="normal"
                       value={taskRequest.category}
                       onChange={handleTaskTypeChange}
                     >
-                      <MenuItem
-                        value="clean"
-                        disabled={!cleaningZones || cleaningZones.length === 0}
-                      >
-                        Clean
-                      </MenuItem>
-                      <MenuItem
-                        value="patrol"
-                        disabled={!patrolWaypoints || patrolWaypoints.length === 0}
-                      >
-                        Patrol
-                      </MenuItem>
-                      <MenuItem
-                        value="delivery"
-                        disabled={
-                          Object.keys(pickupPoints).length === 0 ||
-                          Object.keys(dropoffPoints).length === 0
-                        }
-                      >
-                        Delivery
-                      </MenuItem>
+                      <MenuItem value="patrol">Patrol</MenuItem>
+                      <MenuItem value="clean">Clean</MenuItem>
+                      <MenuItem value="delivery">Delivery</MenuItem>
                     </TextField>
                   </Grid>
-                  {startTimeEnabled && (
-                    <Grid item xs={10}>
-                      <DateTimePicker
-                        inputFormat={'MM/dd/yyyy HH:mm'}
-                        minutesStep={1}
-                        value={
-                          taskRequest.unix_millis_earliest_start_time
-                            ? new Date(taskRequest.unix_millis_earliest_start_time)
-                            : new Date()
-                        }
-                        onChange={(date) => {
-                          if (!date) {
-                            return;
-                          }
-                          taskRequest.unix_millis_earliest_start_time = date.valueOf();
-                          setFavoriteTaskBuffer({
-                            ...favoriteTaskBuffer,
-                            unix_millis_earliest_start_time: date.valueOf(),
-                          });
-                          updateTasks();
-                        }}
-                        label="Start Time"
-                        renderInput={(props) => <TextField {...props} />}
-                      />
-                    </Grid>
-                  )}
-                  <Grid item xs={startTimeEnabled ? 2 : 12}>
-                    <PositiveIntField
+                  <Grid item xs={12}>
+                    <TextField
+                      select
                       id="priority"
                       label="Priority"
-                      // FIXME(AA): The priority object is currently undefined.
-                      value={(taskRequest.priority as Record<string, number>)?.value || 0}
-                      onChange={(_ev, val) => {
-                        taskRequest.priority = { type: 'binary', value: val };
+                      fullWidth
+                      value={getPriorityValue(taskRequest.priority)}
+                      SelectProps={{
+                        renderValue: (selected) => {
+                          const option = getPriorityOption(Number(selected));
+                          return (
+                            <span
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: PRIORITY_LABEL_GAP,
+                              }}
+                            >
+                              <span
+                                style={{
+                                  width: PRIORITY_DOT_SIZE,
+                                  height: PRIORITY_DOT_SIZE,
+                                  borderRadius: '50%',
+                                  backgroundColor: option.color,
+                                  display: 'inline-block',
+                                }}
+                              />
+                              {option.label}
+                            </span>
+                          );
+                        },
+                      }}
+                      onChange={(ev) => {
+                        const value = Number(ev.target.value);
+                        taskRequest.priority = { type: 'binary', value };
                         setFavoriteTaskBuffer({
                           ...favoriteTaskBuffer,
-                          priority: { type: 'binary', value: val },
+                          priority: { type: 'binary', value },
                         });
                         updateTasks();
                       }}
-                    />
-                  </Grid>
-                  <Grid item xs={12}>
-                    <FormControlLabel
-                      control={
-                        <Checkbox
-                          checked={hasCriticalLabel(taskRequest.labels)}
-                          onChange={(ev) => setTaskCritical(ev.target.checked)}
-                        />
-                      }
-                      label={
-                        <span>
-                          Critical task (interrupt current task on selected robot){' '}
-                          <Tooltip
-                            title={
-                              'Immediate: dispatch-now tasks preempt currently active tasks. Scheduled: label ensures the run will preempt only when it is actually dispatched at its scheduled start.'
-                            }
+                    >
+                      {PRIORITY_OPTIONS.map((option) => (
+                        <MenuItem key={option.value} value={option.value}>
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: PRIORITY_LABEL_GAP,
+                            }}
                           >
-                            <InfoOutlined fontSize="small" />
-                          </Tooltip>
-                        </span>
-                      }
-                    />
+                            <span
+                              style={{
+                                width: PRIORITY_DOT_SIZE,
+                                height: PRIORITY_DOT_SIZE,
+                                borderRadius: '50%',
+                                backgroundColor: option.color,
+                                display: 'inline-block',
+                              }}
+                            />
+                            {option.label}
+                          </span>
+                        </MenuItem>
+                      ))}
+                    </TextField>
                   </Grid>
                 </Grid>
                 <Divider
@@ -1214,7 +1188,7 @@ export function CreateTaskForm({
               <Button
                 variant="contained"
                 color="primary"
-                disabled={submitting || !formFullyFilled}
+                disabled={submitting || !formFullyFilled || taskRequest.category === 'delivery'}
                 className={classes.actionBtn}
                 onClick={() => setOpenSchedulingDialog(true)}
               >
@@ -1282,7 +1256,7 @@ export function CreateTaskForm({
           }}
         >
           <Grid container spacing={theme.spacing(2)} marginTop={theme.spacing(1)}>
-            <Grid item xs={6}>
+            <Grid item xs={12}>
               <DatePicker
                 value={schedule.startOn}
                 onChange={(date) =>
@@ -1337,12 +1311,28 @@ export function CreateTaskForm({
               />
             </Grid>
             <Grid item xs={12}>
-              <DaySelectorSwitch
-                value={schedule.days}
-                disabled={!scheduleEnabled}
-                onChange={(days) => setSchedule((prev) => ({ ...prev, days }))}
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={schedule.recurring}
+                    disabled={!scheduleEnabled}
+                    onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
+                      setSchedule((prev) => ({ ...prev, recurring: event.target.checked }))
+                    }
+                  />
+                }
+                label="Recurring"
               />
             </Grid>
+            {schedule.recurring && (
+              <Grid item xs={12}>
+                <DaySelectorSwitch
+                  value={schedule.days}
+                  disabled={!scheduleEnabled}
+                  onChange={(days) => setSchedule((prev) => ({ ...prev, days }))}
+                />
+              </Grid>
+            )}
           </Grid>
           <Grid container marginTop={theme.spacing(1)} marginLeft={theme.spacing(0)}>
             <FormControl fullWidth={true}>

@@ -135,6 +135,13 @@ export const scheduleWithSelectedDay = (scheduleTask: ApiSchedule[], date: Date)
     days: daysArray,
     until: endOfDay(new Date(date.toISOString())),
     at: scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
+    plannedEndAt: scheduleTask[0].planned_end_at
+      ? getPlannedEnd(
+          scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
+          scheduleTask[0].planned_end_at,
+        )
+      : undefined,
+    recurring: true,
   };
 };
 
@@ -157,6 +164,13 @@ export const apiScheduleToSchedule = (scheduleTask: ApiSchedule[]): Schedule => 
     days: daysArray,
     until: scheduleTask[0].until ? new Date(scheduleTask[0].until) : undefined,
     at: scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
+    plannedEndAt: scheduleTask[0].planned_end_at
+      ? getPlannedEnd(
+          scheduleTask[0].start_from ? new Date(scheduleTask[0].start_from) : new Date(),
+          scheduleTask[0].planned_end_at,
+        )
+      : undefined,
+    recurring: true,
   };
 };
 

@@ -509,14 +509,21 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
         throw new Error('tasks api not available');
       }
 
-      await Promise.all(
-        taskRequests.map((request) =>
-          rmf.tasksApi.postDispatchTaskTasksDispatchTaskPost({
-            type: 'dispatch_task_request',
-            request,
-          }),
-        ),
-      );
+      if (!schedule) {
+        await Promise.all(
+          taskRequests.map((request) =>
+            rmf.tasksApi.postDispatchTaskTasksDispatchTaskPost({
+              type: 'dispatch_task_request',
+              request,
+            }),
+          ),
+        );
+      } else {
+        const scheduleRequests = taskRequests.map((req) => toApiSchedule(req, schedule));
+        await Promise.all(
+          scheduleRequests.map((req) => rmf.tasksApi.postScheduledTaskScheduledTasksPost(req)),
+        );
+      }
 
       AppEvents.refreshTaskApp.next();
     },
@@ -906,7 +913,6 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
       {openCreateTaskForm && (
         <CreateTaskForm
           user={username ? username : 'unknown user'}
-          mode="immediate"
           patrolWaypoints={waypointNames}
           cleaningZones={cleaningZoneNames}
           pickupPoints={pickupPoints}
