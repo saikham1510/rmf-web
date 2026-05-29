@@ -699,3 +699,76 @@ class TestScheduledTasksRoute(AppFixture):
             ],
             cancel_payload["labels"],
         )
+
+    def test_cancel_active_scheduled_task_if_overdue_ignores_task_start_time(self):
+        portal = self.get_portal()
+
+        async def create_schedule() -> int:
+            task = await ttm.ScheduledTask.create(
+                task_request={
+                    "category": "patrol",
+                    "description": {
+                        "places": ["wp1", "wp2"],
+                        "rounds": 2,
+                    },
+                },
+                created_by="test",
+            )
+            schedule = await ttm.ScheduledTaskSchedule.create(
+                scheduled_task=task,
+                period=ttm.ScheduledTaskSchedule.Period.Day,
+                start_from=datetime.now(timezone.utc),
+                planned_end_at="00:00",
+                dispatched=True,
+            )
+            await schedule.fetch_related("scheduled_task")
+            return schedule.get_id()
+
+        schedule_id = portal.call(create_schedule)
+        active_state = make_task_state(
+            task_id="active_task_started_early",
+            labels=[f"scheduled_schedule_id={schedule_id}"],
+        )
+        active_state.status = mdl.TaskStatus.underway
+        active_state.unix_millis_finish_time = None
+        active_state.unix_millis_start_time = int(
+            (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp() * 1000
+        )
+
+        mock_service = MagicMock()
+        mock_service.call = AsyncMock(return_value='{"success": true}')
+
+        def _assert_skip_due_to_planned_end(
+            _schedule_row,
+            _now_utc,
+            candidate_dt_utc=None,
+        ) -> bool:
+            self.assertIsNone(candidate_dt_utc)
+            return True
+
+        with patch.object(
+            scheduled_tasks_module,
+            "should_skip_due_to_planned_end",
+            side_effect=_assert_skip_due_to_planned_end,
+        ), patch.object(
+            scheduled_tasks_module,
+            "tasks_service",
+            return_value=mock_service,
+        ):
+
+            async def run_cancel() -> bool:
+                schedule_row = await ttm.ScheduledTaskSchedule.get_or_none(
+                    _id=schedule_id
+                ).select_related("scheduled_task")
+                assert schedule_row is not None
+                return await scheduled_tasks_module.cancel_active_scheduled_task_if_overdue(
+                    schedule_row,
+                    active_state,
+                    MagicMock(),
+                    datetime.now(timezone.utc),
+                )
+
+            cancelled = portal.call(run_cancel)
+
+        self.assertTrue(cancelled)
+        mock_service.call.assert_awaited_once()
