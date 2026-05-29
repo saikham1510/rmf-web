@@ -6,4 +6,6 @@ npm-debug.log
 __pycache__/
 /static
 *.bak
-
+# build / runtime artifacts
+packages/api-server/install/
+packages/api-server/log/
