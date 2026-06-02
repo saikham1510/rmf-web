@@ -31,11 +31,19 @@ async def get_alert(alert_id: str, repo: AlertRepository = Depends(alert_repo_de
 
 @router.post("", status_code=201, response_model=ttm.AlertPydantic)
 async def create_alert(
-    alert_id: str, category: str, repo: AlertRepository = Depends(alert_repo_dep)
+    alert_id: str,
+    category: str,
+    severity: str = None,
+    source_type: str = None,
+    dedup_key: str = None,
+    repo: AlertRepository = Depends(alert_repo_dep),
 ):
-    alert = await repo.create_alert(alert_id, category)
+    alert = await repo.create_alert(
+        alert_id, category, severity, source_type, dedup_key
+    )
     if alert is None:
         raise HTTPException(404, f"Could not create alert with ID {alert_id}")
+    alert_events.alerts.on_next(alert)
     return alert
 
 
