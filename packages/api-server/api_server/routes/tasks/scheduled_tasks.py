@@ -501,20 +501,11 @@ async def cancel_active_scheduled_task_if_overdue(
 
     if task_state.status not in ACTIVE_SCHEDULED_TASK_STATUSES:
         return False
-    if task_state.unix_millis_finish_time is not None:
-        return False
-
-    task_start_utc = None
-    if task_state.unix_millis_start_time is not None:
-        task_start_utc = datetime.fromtimestamp(
-            task_state.unix_millis_start_time / 1000,
-            tz=timezone.utc,
-        )
 
     if not should_skip_due_to_planned_end(
         schedule_row,
         now_utc,
-        candidate_dt_utc=task_start_utc,
+        candidate_dt_utc=None,
     ):
         return False
 
