@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pydantic
-
 from api_server import models as mdl
 from api_server.models import TaskEventLog, TaskState
 from api_server.repositories import TaskRepository
@@ -371,6 +370,154 @@ class TestDispatchTask(AppFixture):
         self.assertEqual(200, resp.status_code, resp.content)
         self.assertEqual("test", resp.json()["category"])
         self.assertEqual("description", resp.json()["description"])
+
+    def test_critical_preemption_kills_before_dispatch(self):
+        portal = self.get_portal()
+        fleet_name = "test_fleet"
+        robot_name = "test_robot"
+        paused_task_id = str(uuid4())
+        critical_task_id = str(uuid4())
+        forced_task_id = "forced_critical_task"
+
+        paused_task = make_task_state(task_id=paused_task_id)
+        paused_task.assigned_to = mdl.AssignedTo(group=fleet_name, name=robot_name)
+        paused_task.status = mdl.TaskStatus.underway
+        paused_task.dispatch = mdl.Dispatch(
+            status=mdl.Status2.dispatched,
+            assignment=mdl.Assignment(
+                fleet_name=fleet_name,
+                expected_robot_name=robot_name,
+            ),
+        )
+
+        critical_request = mdl.TaskRequest(
+            category="test",
+            description="critical dispatch",
+            labels=["critical=true"],
+        )
+
+        completed_state = make_task_state(task_id=forced_task_id)
+        completed_state.status = mdl.TaskStatus.completed
+
+        call_order = []
+        fleet_poll_count = 0
+
+        async def fake_get_fleet_state(name: str):
+            nonlocal fleet_poll_count
+            fleet_poll_count += 1
+            return mdl.FleetState(
+                name=name,
+                robots={
+                    robot_name: mdl.RobotState(
+                        name=robot_name,
+                        status="working",
+                        task_id=paused_task_id,
+                    )
+                },
+            )
+
+        async def fake_service_call(payload: str, timeout=None):
+            data = json.loads(payload)
+            request_type = data["type"]
+            if request_type == "interrupt_task_request":
+                call_order.append("interrupt")
+                return '{"success": true, "token": "token"}'
+            if request_type == "kill_task_request":
+                call_order.append("kill")
+                return '{"success": true}'
+            if request_type == "robot_task_request":
+                call_order.append("dispatch")
+                self.assertGreaterEqual(
+                    fleet_poll_count,
+                    1,
+                    "expected the dispatch path to read fleet state before dispatch",
+                )
+                self.assertEqual(
+                    call_order[:3],
+                    ["interrupt", "kill", "dispatch"],
+                    "critical dispatch must happen only after interrupt and kill",
+                )
+                return f'{{"success": true, "state": {{"booking": {{"id": "{forced_task_id}"}}}}}}'
+            if request_type == "cancel_task_request":
+                call_order.append("cancel")
+                return '{"success": true}'
+            if request_type == "resume_task_request":
+                call_order.append("resume")
+                return '{"success": true}'
+            raise AssertionError(f"unexpected RMF request type: {request_type}")
+
+        task_repo = AsyncMock(spec=TaskRepository)
+        task_repo.query_task_states.return_value = [paused_task]
+        task_repo.get_task_request.return_value = critical_request
+        task_repo.get_task_state.side_effect = (
+            lambda task_id: completed_state if task_id == forced_task_id else None
+        )
+
+        fleet_repo = AsyncMock()
+        fleet_repo.get_fleet_state.side_effect = fake_get_fleet_state
+
+        with patch.object(
+            tasks_service(), "call", side_effect=fake_service_call
+        ), patch.object(tasks_route, "_spawn_background_task", return_value=None):
+            portal.call(
+                tasks_route._handle_critical_preemption,
+                critical_task_id,
+                task_repo,
+                fleet_repo,
+                True,
+            )
+
+        self.assertGreaterEqual(fleet_poll_count, 1)
+        self.assertIn("kill", call_order)
+        self.assertIn("dispatch", call_order)
+        self.assertLess(call_order.index("kill"), call_order.index("dispatch"))
+        self.assertTrue(task_repo.save_task_request.called)
+        self.assertTrue(task_repo.save_task_state.called)
+
+    def test_wait_for_robot_stop_uses_task_id_release(self):
+        portal = self.get_portal()
+        fleet_name = "test_fleet"
+        robot_name = "test_robot"
+        paused_task_id = str(uuid4())
+        released_task_id = str(uuid4())
+
+        fleet_states = [
+            mdl.FleetState(
+                name=fleet_name,
+                robots={
+                    robot_name: mdl.RobotState(
+                        name=robot_name,
+                        status="working",
+                        task_id=paused_task_id,
+                    )
+                },
+            ),
+            mdl.FleetState(
+                name=fleet_name,
+                robots={
+                    robot_name: mdl.RobotState(
+                        name=robot_name,
+                        status="working",
+                        task_id=released_task_id,
+                    )
+                },
+            ),
+        ]
+
+        fleet_repo = AsyncMock()
+        fleet_repo.get_fleet_state.side_effect = fleet_states
+
+        ready, status = portal.call(
+            tasks_route._wait_for_robot_stop,
+            fleet_repo,
+            fleet_name,
+            robot_name,
+            paused_task_id,
+            0.5,
+        )
+
+        self.assertTrue(ready)
+        self.assertEqual("working", status)
 
     def test_fail_with_multiple_errors(self):
         # fails with multiple errors

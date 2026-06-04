@@ -33,6 +33,10 @@ import { getShortDescription, RecurringDays, Schedule } from 'react-components';
  * @param getEventTitle Callback function to get the event title.
  * @returns List of ProcessedEvents to occur within the query start and end.
  */
+
+const getPlannedEnd = (date: Date, plannedEndAt?: string | null): Date => {
+  return plannedEndAt ? new Date(plannedEndAt) : date;
+};
 export const scheduleToEvents = (
   start: Date,
   end: Date,
