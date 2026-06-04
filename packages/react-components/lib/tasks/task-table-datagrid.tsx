@@ -53,6 +53,16 @@ const StyledDataGrid = styled(DataGrid)(({ theme }) => ({
   },
 }));
 
+function formatTaskCategory(category: string | null | undefined): string {
+  if (category === 'clean') {
+    return 'Clean';
+  }
+  if (category === 'patrol') {
+    return 'Patrol';
+  }
+  return category || 'unknown';
+}
+
 export interface Tasks {
   isLoading: boolean;
   data: TaskState[];
@@ -223,8 +233,7 @@ export function TaskDataGridTable({
       headerName: 'Category',
       width: 150,
       editable: false,
-      valueGetter: (params: GridValueGetterParams) =>
-        params.row.category ? params.row.category : 'unknown',
+      valueGetter: (params: GridValueGetterParams) => formatTaskCategory(params.row.category),
       flex: 1,
       filterOperators: getMinimalStringFilterOperators,
       filterable: true,
