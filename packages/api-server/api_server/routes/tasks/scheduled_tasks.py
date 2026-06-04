@@ -129,17 +129,8 @@ def _build_request_for_schedule_dispatch(
 
     task_request_data = _parse_task_request_dict(parent_task.task_request)
 
-    # Scheduled patrols are intentionally dispatched one loop at a time.
-    if task_request_data.get("category") == "patrol" and isinstance(
-        task_request_data.get("description"), dict
-    ):
-        task_request_data = {
-            **task_request_data,
-            "description": {
-                **task_request_data["description"],
-                "rounds": 1,
-            },
-        }
+    # Preserve the original task description (including `rounds`) so scheduled
+    # patrols run for the configured number of loops.
 
     labels = list(task_request_data.get("labels") or [])
     labels.append(f"scheduled_task_id={parent_task.id}")
@@ -185,6 +176,16 @@ async def _dispatch_schedule_task_request(
         schedule_row,
         chain_parent_task_id=chain_parent_task_id,
     )
+    # Debug log: show the outgoing task request payload to help diagnose
+    # cases where `description.rounds` may be missing or overwritten.
+    try:
+        logger.debug(
+            "scheduled dispatch payload schedule_id=%s task_request=%s",
+            schedule_row.get_id(),
+            task_request.model_dump_json(exclude_none=True),
+        )
+    except Exception:
+        logger.exception("failed to render scheduled dispatch payload for logging")
     dispatch_request = DispatchTaskRequest(
         type="dispatch_task_request",
         request=task_request,
@@ -248,20 +249,6 @@ async def try_dispatch_chained_schedule_run(
             schedule_row.get_id(),
         )
         return False
-
-    # If the next scheduled occurrence is still in the future, do not chain
-    # another run yet. This keeps scheduled work aligned to its actual window
-    # instead of re-dispatching immediately after the previous task completes.
-    next_run_at = schedule_row.next_run_at or schedule_row.start_from
-    if next_run_at is not None:
-        next_run = _ensure_utc_aware(next_run_at)
-        if next_run > now_utc:
-            logger.info(
-                "chain: schedule_id=%s wait until next run at %s",
-                schedule_row.get_id(),
-                next_run.isoformat(),
-            )
-            return False
 
     if await _schedule_has_active_tasks(schedule_row.get_id(), task_repo):
         logger.info(
