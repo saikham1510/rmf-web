@@ -1,15 +1,20 @@
 /**
- * FIXME(kp): Make the whole task request system task agnostic.
- * For that RMF needs to support task discovery and UI schemas https://github.com/open-rmf/rmf_api_msgs/issues/32.
- */
+
+* FIXME(kp): Make the whole task request system task agnostic.
+
+* For that RMF needs to support task discovery and UI schemas https://github.com/open-rmf/rmf_api_msgs/issues/32.
+
+*/
 
 import UpdateIcon from '@mui/icons-material/Create';
+
 import DeleteIcon from '@mui/icons-material/Delete';
+
 import PlaceOutlined from '@mui/icons-material/PlaceOutlined';
+
 import {
   Autocomplete,
   Button,
-  Checkbox,
   Chip,
   Dialog,
   DialogActions,
@@ -35,32 +40,44 @@ import {
   Typography,
   useTheme,
 } from '@mui/material';
+
 import { DatePicker, TimePicker } from '@mui/x-date-pickers';
+
 import type { TaskFavoritePydantic as TaskFavorite, TaskRequest } from 'api-client';
+
 import React from 'react';
+
 import { Loading } from '..';
+
 import { ConfirmationDialog, ConfirmationDialogProps } from '../confirmation-dialog';
+
 import { PositiveIntField } from '../form-inputs';
 
 // A bunch of manually defined descriptions to avoid using `any`.
+
 interface Payload {
   sku: string;
+
   quantity: number;
 }
 
 interface TaskPlace {
   place: string;
+
   handler: string;
+
   payload: Payload;
 }
 
 interface DeliveryTaskDescription {
   pickup: TaskPlace;
+
   dropoff: TaskPlace;
 }
 
 interface PatrolTaskDescription {
   places: string[];
+
   rounds: number;
 }
 
@@ -71,15 +88,19 @@ interface CleanTaskDescription {
 type TaskDescription = DeliveryTaskDescription | PatrolTaskDescription | CleanTaskDescription;
 
 const isNonEmptyString = (value: string): boolean => value.length > 0;
+
 const isPositiveNumber = (value: number): boolean => value > 0;
 
 const PRIORITY_OPTIONS = [
   { label: 'Normal', value: 0, color: '#42A5F5' },
+
   { label: 'Urgent', value: 1, color: '#FB8C00' },
+
   { label: 'Critical', value: 2, color: '#E53935' },
 ] as const;
 
 const PRIORITY_DOT_SIZE = 18;
+
 const PRIORITY_LABEL_GAP = 12;
 
 const isPriorityValue = (value: unknown): value is number => {
@@ -88,6 +109,7 @@ const isPriorityValue = (value: unknown): value is number => {
 
 const getPriorityValue = (priority: TaskRequest['priority']): number => {
   const value = (priority as Record<string, number> | undefined)?.value;
+
   return isPriorityValue(value) ? value : 0;
 };
 
@@ -109,14 +131,17 @@ const isDeliveryTaskDescriptionValid = (taskDescription: DeliveryTaskDescription
 };
 
 const isPatrolTaskDescriptionValid = (taskDescription: PatrolTaskDescription): boolean => {
-  if (taskDescription.places.length === 0) {
+  // A patrol/loop needs at least two places to form a route RMF can bid on.
+  if (taskDescription.places.length < 2) {
     return false;
   }
+
   for (const place of taskDescription.places) {
     if (place.length === 0) {
       return false;
     }
   }
+
   return taskDescription.rounds > 0;
 };
 
@@ -126,27 +151,39 @@ const isCleanTaskDescriptionValid = (taskDescription: CleanTaskDescription): boo
 
 const classes = {
   title: 'dialogue-info-value',
+
   selectFileBtn: 'create-task-selected-file-btn',
+
   taskList: 'create-task-task-list',
+
   selectedTask: 'create-task-selected-task',
+
   actionBtn: 'dialogue-action-button',
 };
+
 const StyledDialog = styled((props: DialogProps) => <Dialog {...props} />)(({ theme }) => ({
   [`& .${classes.selectFileBtn}`]: {
     marginBottom: theme.spacing(1),
   },
+
   [`& .${classes.taskList}`]: {
     flex: '1 1 auto',
+
     minHeight: 400,
+
     maxHeight: '50vh',
+
     overflow: 'auto',
   },
+
   [`& .${classes.selectedTask}`]: {
     background: theme.palette.action.focus,
   },
+
   [`& .${classes.title}`]: {
     flex: '1 1 auto',
   },
+
   [`& .${classes.actionBtn}`]: {
     minWidth: 80,
   },
@@ -157,15 +194,19 @@ export function getShortDescription(taskRequest: TaskRequest): string {
     case 'clean': {
       return `[Clean] zone [${taskRequest.description.zone}]`;
     }
+
     case 'delivery': {
       return `[Delivery] from [${taskRequest.description.pickup.place}] to [${taskRequest.description.dropoff.place}]`;
     }
+
     case 'patrol': {
       const formattedPlaces = taskRequest.description.places.map((place: string) => `[${place}]`);
+
       return `[Patrol] [${taskRequest.description.rounds}] round/s, along ${formattedPlaces.join(
         ', ',
       )}`;
     }
+
     default:
       return `[Unknown] type "${taskRequest.category}"`;
   }
@@ -191,22 +232,32 @@ function FormToolbar({ onSelectFileClick }: FormToolbarProps) {
 
 interface DeliveryTaskFormProps {
   taskDesc: DeliveryTaskDescription;
+
   pickupPoints: Record<string, string>;
+
   dropoffPoints: Record<string, string>;
+
   onChange(taskDesc: TaskDescription): void;
+
   allowSubmit(allow: boolean): void;
 }
 
 function DeliveryTaskForm({
   taskDesc,
+
   pickupPoints = {},
+
   dropoffPoints = {},
+
   onChange,
+
   allowSubmit,
 }: DeliveryTaskFormProps) {
   const theme = useTheme();
+
   const onInputChange = (desc: DeliveryTaskDescription) => {
     allowSubmit(isDeliveryTaskDescriptionValid(desc));
+
     onChange(desc);
   };
 
@@ -221,13 +272,18 @@ function DeliveryTaskForm({
           value={taskDesc.pickup.place}
           onChange={(_ev, newValue) => {
             const place = newValue ?? '';
+
             const handler =
               newValue !== null && pickupPoints[newValue] ? pickupPoints[newValue] : '';
+
             onInputChange({
               ...taskDesc,
+
               pickup: {
                 ...taskDesc.pickup,
+
                 place: place,
+
                 handler: handler,
               },
             });
@@ -236,9 +292,12 @@ function DeliveryTaskForm({
             pickupPoints[(ev.target as HTMLInputElement).value] &&
             onInputChange({
               ...taskDesc,
+
               pickup: {
                 ...taskDesc.pickup,
+
                 place: (ev.target as HTMLInputElement).value,
+
                 handler: pickupPoints[(ev.target as HTMLInputElement).value],
               },
             })
@@ -248,6 +307,7 @@ function DeliveryTaskForm({
           )}
         />
       </Grid>
+
       <Grid item xs={4}>
         <TextField
           id="pickup_sku"
@@ -258,10 +318,13 @@ function DeliveryTaskForm({
           onChange={(ev) => {
             onInputChange({
               ...taskDesc,
+
               pickup: {
                 ...taskDesc.pickup,
+
                 payload: {
                   ...taskDesc.pickup.payload,
+
                   sku: ev.target.value,
                 },
               },
@@ -269,6 +332,7 @@ function DeliveryTaskForm({
           }}
         />
       </Grid>
+
       <Grid item xs={2}>
         <PositiveIntField
           id="pickup_quantity"
@@ -277,10 +341,13 @@ function DeliveryTaskForm({
           onChange={(_ev, val) => {
             onInputChange({
               ...taskDesc,
+
               pickup: {
                 ...taskDesc.pickup,
+
                 payload: {
                   ...taskDesc.pickup.payload,
+
                   quantity: val,
                 },
               },
@@ -288,6 +355,7 @@ function DeliveryTaskForm({
           }}
         />
       </Grid>
+
       <Grid item xs={6}>
         <Autocomplete
           id="dropoff-location"
@@ -297,13 +365,18 @@ function DeliveryTaskForm({
           value={taskDesc.dropoff.place}
           onChange={(_ev, newValue) => {
             const place = newValue ?? '';
+
             const handler =
               newValue !== null && dropoffPoints[newValue] ? dropoffPoints[newValue] : '';
+
             onInputChange({
               ...taskDesc,
+
               dropoff: {
                 ...taskDesc.dropoff,
+
                 place: place,
+
                 handler: handler,
               },
             });
@@ -312,9 +385,12 @@ function DeliveryTaskForm({
             dropoffPoints[(ev.target as HTMLInputElement).value] &&
             onInputChange({
               ...taskDesc,
+
               dropoff: {
                 ...taskDesc.dropoff,
+
                 place: (ev.target as HTMLInputElement).value,
+
                 handler: dropoffPoints[(ev.target as HTMLInputElement).value],
               },
             })
@@ -324,6 +400,7 @@ function DeliveryTaskForm({
           )}
         />
       </Grid>
+
       <Grid item xs={4}>
         <TextField
           id="dropoff_sku"
@@ -334,10 +411,13 @@ function DeliveryTaskForm({
           onChange={(ev) => {
             onInputChange({
               ...taskDesc,
+
               dropoff: {
                 ...taskDesc.dropoff,
+
                 payload: {
                   ...taskDesc.dropoff.payload,
+
                   sku: ev.target.value,
                 },
               },
@@ -345,6 +425,7 @@ function DeliveryTaskForm({
           }}
         />
       </Grid>
+
       <Grid item xs={2}>
         <PositiveIntField
           id="dropoff_quantity"
@@ -353,10 +434,13 @@ function DeliveryTaskForm({
           onChange={(_ev, val) => {
             onInputChange({
               ...taskDesc,
+
               dropoff: {
                 ...taskDesc.dropoff,
+
                 payload: {
                   ...taskDesc.dropoff.payload,
+
                   quantity: val,
                 },
               },
@@ -370,17 +454,21 @@ function DeliveryTaskForm({
 
 interface PlaceListProps {
   places: string[];
+
   onClick(places_index: number): void;
 }
 
 function PlaceList({ places, onClick }: PlaceListProps) {
   const theme = useTheme();
+
   return (
     <List
       dense
       sx={{
         bgcolor: 'background.paper',
+
         marginLeft: theme.spacing(3),
+
         marginRight: theme.spacing(3),
       }}
     >
@@ -396,7 +484,8 @@ function PlaceList({ places, onClick }: PlaceListProps) {
           <ListItemIcon>
             <PlaceOutlined />
           </ListItemIcon>
-          <ListItemText primary={`Place Name:   ${value}`} />
+
+          <ListItemText primary={`Place Name: ${value}`} />
         </ListItem>
       ))}
     </List>
@@ -405,15 +494,20 @@ function PlaceList({ places, onClick }: PlaceListProps) {
 
 interface PatrolTaskFormProps {
   taskDesc: PatrolTaskDescription;
+
   patrolWaypoints: string[];
+
   onChange(patrolTaskDescription: PatrolTaskDescription): void;
+
   allowSubmit(allow: boolean): void;
 }
 
 function PatrolTaskForm({ taskDesc, patrolWaypoints, onChange, allowSubmit }: PatrolTaskFormProps) {
   const theme = useTheme();
+
   const onInputChange = (desc: PatrolTaskDescription) => {
     allowSubmit(isPatrolTaskDescriptionValid(desc));
+
     onChange(desc);
   };
 
@@ -429,12 +523,14 @@ function PatrolTaskForm({ taskDesc, patrolWaypoints, onChange, allowSubmit }: Pa
             newValue !== null &&
             onInputChange({
               ...taskDesc,
+
               places: taskDesc.places.concat(newValue).filter((el: string) => el),
             })
           }
           renderInput={(params) => <TextField {...params} label="Place Name" required={true} />}
         />
       </Grid>
+
       <Grid item xs={12}>
         <PlaceList
           places={taskDesc && taskDesc.places ? taskDesc.places : []}
@@ -452,14 +548,18 @@ function PatrolTaskForm({ taskDesc, patrolWaypoints, onChange, allowSubmit }: Pa
 
 interface CleanTaskFormProps {
   taskDesc: CleanTaskDescription;
+
   cleaningZones: string[];
+
   onChange(cleanTaskDescription: CleanTaskDescription): void;
+
   allowSubmit(allow: boolean): void;
 }
 
 function CleanTaskForm({ taskDesc, cleaningZones, onChange, allowSubmit }: CleanTaskFormProps) {
   const onInputChange = (desc: CleanTaskDescription) => {
     allowSubmit(isCleanTaskDescriptionValid(desc));
+
     onChange(desc);
   };
 
@@ -472,8 +572,10 @@ function CleanTaskForm({ taskDesc, cleaningZones, onChange, allowSubmit }: Clean
       value={taskDesc.zone}
       onChange={(_ev, newValue) => {
         const zone = newValue ?? '';
+
         onInputChange({
           ...taskDesc,
+
           zone: zone,
         });
       }}
@@ -485,21 +587,33 @@ function CleanTaskForm({ taskDesc, cleaningZones, onChange, allowSubmit }: Clean
 
 interface FavoriteTaskProps {
   listItemText: string;
+
   listItemClick: () => void;
+
   favoriteTask: TaskFavorite;
+
   setFavoriteTask: (favoriteTask: TaskFavorite) => void;
+
   setOpenDialog: (open: boolean) => void;
+
   setCallToDelete: (open: boolean) => void;
+
   setCallToUpdate: (open: boolean) => void;
 }
 
 function FavoriteTask({
   listItemText,
+
   listItemClick,
+
   favoriteTask,
+
   setFavoriteTask,
+
   setOpenDialog,
+
   setCallToDelete,
+
   setCallToUpdate,
 }: FavoriteTaskProps) {
   const theme = useTheme();
@@ -510,6 +624,7 @@ function FavoriteTask({
         sx={{ width: theme.spacing(30) }}
         onClick={() => {
           listItemClick();
+
           setCallToUpdate(false);
         }}
         role="listitem button"
@@ -517,23 +632,28 @@ function FavoriteTask({
         divider={true}
       >
         <ListItemText primary={listItemText} />
+
         <ListItemSecondaryAction>
           <IconButton
             edge="end"
             aria-label="update"
             onClick={() => {
               setCallToUpdate(true);
+
               listItemClick();
             }}
           >
             <UpdateIcon />
           </IconButton>
+
           <IconButton
             edge="end"
             aria-label="delete"
             onClick={() => {
               setOpenDialog(true);
+
               setFavoriteTask(favoriteTask);
+
               setCallToDelete(true);
             }}
           >
@@ -554,6 +674,7 @@ function defaultCleanTask(): CleanTaskDescription {
 function defaultPatrolTask(): PatrolTaskDescription {
   return {
     places: [],
+
     rounds: 1,
   };
 }
@@ -562,17 +683,24 @@ function defaultDeliveryTask(): DeliveryTaskDescription {
   return {
     pickup: {
       place: '',
+
       handler: '',
+
       payload: {
         sku: '',
+
         quantity: 1,
       },
     },
+
     dropoff: {
       place: '',
+
       handler: '',
+
       payload: {
         sku: '',
+
         quantity: 1,
       },
     },
@@ -583,10 +711,13 @@ function defaultTaskDescription(taskCategory: string): TaskDescription | undefin
   switch (taskCategory) {
     case 'clean':
       return defaultCleanTask();
+
     case 'patrol':
       return defaultPatrolTask();
+
     case 'delivery':
       return defaultDeliveryTask();
+
     default:
       return undefined;
   }
@@ -595,10 +726,15 @@ function defaultTaskDescription(taskCategory: string): TaskDescription | undefin
 function defaultTask(): TaskRequest {
   return {
     category: 'patrol',
+
     description: defaultPatrolTask(),
+
     unix_millis_earliest_start_time: 0,
+
     unix_millis_request_time: Date.now(),
+
     priority: { type: 'binary', value: 0 },
+
     requester: '',
   };
 }
@@ -607,26 +743,41 @@ export type RecurringDays = [boolean, boolean, boolean, boolean, boolean, boolea
 
 export interface Schedule {
   startOn: Date;
+
   days: RecurringDays;
+
   until?: Date;
+
   at: Date;
+
   plannedEndAt?: Date;
+
   recurring: boolean;
 }
 
 enum ScheduleUntilValue {
   NEVER = 'never',
+
   ON = 'on',
+}
+
+enum ScheduleTypeValue {
+  ONE_TIME = 'one-time',
+
+  RECURRING = 'recurring',
 }
 
 interface DaySelectorSwitchProps {
   disabled?: boolean;
+
   onChange: (checked: RecurringDays) => void;
+
   value: RecurringDays;
 }
 
 const DaySelectorSwitch: React.VFC<DaySelectorSwitchProps> = ({ disabled, onChange, value }) => {
   const theme = useTheme();
+
   const renderChip = (idx: number, text: string) => (
     <Chip
       key={idx}
@@ -637,18 +788,26 @@ const DaySelectorSwitch: React.VFC<DaySelectorSwitchProps> = ({ disabled, onChan
       disabled={disabled}
       onClick={() => {
         value[idx] = !value[idx];
+
         onChange([...value]);
       }}
     />
   );
+
   return (
     <div>
       {renderChip(0, 'Mon')}
+
       {renderChip(1, 'Tue')}
+
       {renderChip(2, 'Wed')}
+
       {renderChip(3, 'Thu')}
+
       {renderChip(4, 'Fri')}
+
       {renderChip(5, 'Sat')}
+
       {renderChip(6, 'Sun')}
     </div>
   );
@@ -657,149 +816,283 @@ const DaySelectorSwitch: React.VFC<DaySelectorSwitchProps> = ({ disabled, onChan
 const defaultFavoriteTask = (): TaskFavorite => {
   return {
     id: '',
+
     name: '',
+
     category: 'patrol',
+
     description: defaultPatrolTask(),
+
     unix_millis_earliest_start_time: 0,
+
     priority: { type: 'binary', value: 0 },
+
     user: '',
   };
 };
 
 const defaultPlannedEnd = (startTime: Date): Date => {
   const plannedEnd = new Date(startTime.valueOf());
+
   plannedEnd.setMinutes(plannedEnd.getMinutes() + 45);
+
   return plannedEnd;
+};
+
+const endOfDay = (date: Date): Date => {
+  const endDate = new Date(date.valueOf());
+
+  endDate.setHours(23, 59, 0, 0);
+
+  return endDate;
+};
+
+const isSameDay = (lhs?: Date, rhs?: Date): boolean => {
+  if (!lhs || !rhs) {
+    return false;
+  }
+
+  return (
+    lhs.getFullYear() === rhs.getFullYear() &&
+    lhs.getMonth() === rhs.getMonth() &&
+    lhs.getDate() === rhs.getDate()
+  );
+};
+
+const getRecurringDaysForDate = (date: Date): RecurringDays => {
+  const days: RecurringDays = [false, false, false, false, false, false, false];
+
+  const dayIndex = date.getDay() === 0 ? 6 : date.getDay() - 1;
+
+  days[dayIndex] = true;
+
+  return days;
+};
+
+const hasSelectedRecurringDay = (days: RecurringDays): boolean => days.some(Boolean);
+
+const makeDefaultSchedule = (): Schedule => {
+  const startOn = new Date();
+
+  return {
+    startOn,
+
+    days: getRecurringDaysForDate(startOn),
+
+    until: endOfDay(startOn),
+
+    at: new Date(startOn.valueOf()),
+
+    recurring: false,
+  };
 };
 
 export interface CreateTaskFormProps
   extends Omit<ConfirmationDialogProps, 'onConfirmClick' | 'toolbar'> {
   /**
-   * Shows extra UI elements suitable for submittng batched tasks. Default to 'false'.
-   */
+
+* Shows extra UI elements suitable for submittng batched tasks. Default to 'false'.
+
+*/
+
   user: string;
+
   allowBatch?: boolean;
+
   showFavorite?: boolean;
+
   cleaningZones?: string[];
+
   patrolWaypoints?: string[];
+
   pickupPoints?: Record<string, string>;
+
   dropoffPoints?: Record<string, string>;
+
   favoritesTasks?: TaskFavorite[];
+
   mode?: 'immediate' | 'full';
+
   scheduleToEdit?: Schedule;
+
   requestTask?: TaskRequest;
+
   submitTasks?(tasks: TaskRequest[], schedule: Schedule | null): Promise<void>;
+
   tasksFromFile?(): Promise<TaskRequest[]> | TaskRequest[];
+
   onSuccess?(tasks: TaskRequest[]): void;
+
   onFail?(error: Error, tasks: TaskRequest[]): void;
+
   onSuccessFavoriteTask?(message: string, favoriteTask: TaskFavorite): void;
+
   onFailFavoriteTask?(error: Error, favoriteTask: TaskFavorite): void;
+
   submitFavoriteTask?(favoriteTask: TaskFavorite): Promise<void>;
+
   deleteFavoriteTask?(favoriteTask: TaskFavorite): Promise<void>;
+
   onSuccessScheduling?(): void;
+
   onFailScheduling?(error: Error): void;
 }
 
 export function CreateTaskForm({
   user,
+
   cleaningZones = [],
+
   patrolWaypoints = [],
+
   pickupPoints = {},
+
   dropoffPoints = {},
+
   favoritesTasks = [],
+
   mode = 'full',
+
   scheduleToEdit,
+
   requestTask,
+
   showFavorite = false,
+
   submitTasks,
+
   tasksFromFile,
+
   onClose,
+
   onSuccess,
+
   onFail,
+
   onSuccessFavoriteTask,
+
   onFailFavoriteTask,
+
   submitFavoriteTask,
+
   deleteFavoriteTask,
+
   onSuccessScheduling,
+
   onFailScheduling,
+
   ...otherProps
 }: CreateTaskFormProps): JSX.Element {
   const theme = useTheme();
+
   const SHOW_FAVORITES_UI = false;
+
   const immediateMode = mode === 'immediate';
-  const defaultSchedule: Schedule = {
-    startOn: new Date(),
-    days: [true, true, true, true, true, true, true],
-    until: undefined,
-    at: new Date(),
-    recurring: false,
-  };
+
+  const defaultSchedule = React.useMemo(() => makeDefaultSchedule(), []);
 
   const [openFavoriteDialog, setOpenFavoriteDialog] = React.useState(false);
+
   const [callToDeleteFavoriteTask, setCallToDeleteFavoriteTask] = React.useState(false);
+
   const [callToUpdateFavoriteTask, setCallToUpdateFavoriteTask] = React.useState(false);
+
   const [deletingFavoriteTask, setDeletingFavoriteTask] = React.useState(false);
 
   const [favoriteTaskBuffer, setFavoriteTaskBuffer] =
     React.useState<TaskFavorite>(defaultFavoriteTask());
+
   const [favoriteTaskTitleError, setFavoriteTaskTitleError] = React.useState(false);
+
   const [savingFavoriteTask, setSavingFavoriteTask] = React.useState(false);
 
   const [taskRequests, setTaskRequests] = React.useState<TaskRequest[]>(() => [
     requestTask ?? defaultTask(),
   ]);
+
   const [selectedTaskIdx, setSelectedTaskIdx] = React.useState(0);
+
   const taskTitles = React.useMemo(
     () => taskRequests && taskRequests.map((t, i) => `${i + 1}: ${getShortDescription(t)}`),
+
     [taskRequests],
   );
+
   const [submitting, setSubmitting] = React.useState(false);
+
   const [formFullyFilled, setFormFullyFilled] = React.useState(requestTask !== undefined || false);
+
   const taskRequest = taskRequests[selectedTaskIdx];
+
   const [openSchedulingDialog, setOpenSchedulingDialog] = React.useState(false);
-  const [schedule, setSchedule] = React.useState<Schedule>(
-    immediateMode
-      ? defaultSchedule
-      : scheduleToEdit
-        ? { ...defaultSchedule, ...scheduleToEdit, recurring: scheduleToEdit.recurring ?? true }
-        : defaultSchedule,
-  );
-  const [scheduleUntilValue, setScheduleUntilValue] = React.useState<string>(
-    immediateMode
-      ? ScheduleUntilValue.NEVER
-      : scheduleToEdit?.until
+
+  const [schedule, setSchedule] = React.useState<Schedule>(() => {
+    if (immediateMode) {
+      return defaultSchedule;
+    }
+
+    if (!scheduleToEdit) {
+      return defaultSchedule;
+    }
+
+    const mergedSchedule = {
+      ...defaultSchedule,
+
+      ...scheduleToEdit,
+
+      recurring: scheduleToEdit.recurring ?? true,
+    };
+
+    return mergedSchedule.recurring
+      ? mergedSchedule
+      : { ...mergedSchedule, until: endOfDay(mergedSchedule.startOn) };
+  });
+
+  const [scheduleUntilValue, setScheduleUntilValue] = React.useState<string>(() => {
+    if (immediateMode) {
+      return ScheduleUntilValue.ON;
+    }
+
+    if (!scheduleToEdit) {
+      return ScheduleUntilValue.ON;
+    }
+
+    return scheduleToEdit.recurring ?? true
+      ? scheduleToEdit.until
         ? ScheduleUntilValue.ON
-        : ScheduleUntilValue.NEVER,
-  );
+        : ScheduleUntilValue.NEVER
+      : ScheduleUntilValue.ON;
+  });
 
   const handleScheduleUntilValue = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.value === ScheduleUntilValue.ON) {
-      /**
-       * Since the time change is done in the onchange of the Datepicker,
-       * we need a defined time if the user saves the value without calling the onChange event of the datepicker
-       */
-      const date = new Date();
-      date.setHours(23);
-      date.setMinutes(59);
-      setSchedule((prev) => ({ ...prev, until: date }));
+      setSchedule((prev) => ({ ...prev, until: endOfDay(prev.startOn) }));
     } else {
       setSchedule((prev) => ({ ...prev, until: undefined }));
     }
+
     setScheduleUntilValue(event.target.value);
   };
+
   // schedule is not supported with batch upload
+
   const scheduleEnabled = !immediateMode && taskRequests.length === 1;
+
   const updateTasks = () => {
     setTaskRequests((prev) => {
       prev.splice(selectedTaskIdx, 1, taskRequest);
+
       return [...prev];
     });
   };
 
   const handleTaskDescriptionChange = (newCategory: string, newDesc: TaskDescription) => {
     taskRequest.category = newCategory;
+
     taskRequest.description = newDesc;
+
     setFavoriteTaskBuffer({ ...favoriteTaskBuffer, description: newDesc, category: newCategory });
+
     updateTasks();
   };
 
@@ -818,6 +1111,7 @@ export function CreateTaskForm({
             allowSubmit={allowSubmit}
           />
         );
+
       case 'patrol':
         return (
           <PatrolTaskForm
@@ -827,6 +1121,7 @@ export function CreateTaskForm({
             allowSubmit={allowSubmit}
           />
         );
+
       case 'delivery':
         return (
           <DeliveryTaskForm
@@ -837,26 +1132,36 @@ export function CreateTaskForm({
             allowSubmit={allowSubmit}
           />
         );
+
       default:
         return null;
     }
   };
+
   const handleTaskTypeChange = (ev: React.ChangeEvent<HTMLInputElement>) => {
     const newCategory = ev.target.value;
+
     const newDesc = defaultTaskDescription(newCategory);
+
     if (newDesc === undefined) {
       return;
     }
+
     taskRequest.description = newDesc;
+
     taskRequest.category = newCategory;
+
     if (newCategory !== 'clean') {
       taskRequest.unix_millis_earliest_start_time = 0;
     }
 
     setFavoriteTaskBuffer({
       ...favoriteTaskBuffer,
+
       category: newCategory,
+
       description: newDesc,
+
       unix_millis_earliest_start_time:
         newCategory === 'clean' ? favoriteTaskBuffer.unix_millis_earliest_start_time : 0,
     });
@@ -865,9 +1170,11 @@ export function CreateTaskForm({
   };
 
   // no memo because deps would likely change
+
   const handleSubmit = async (scheduling: boolean) => {
     if (!submitTasks) {
       onSuccess && onSuccess(taskRequests);
+
       return;
     }
 
@@ -875,16 +1182,21 @@ export function CreateTaskForm({
 
     for (const t of taskRequests) {
       t.requester = requester;
+
       t.unix_millis_request_time = Date.now();
+
       if (t.category !== 'clean') {
         t.unix_millis_earliest_start_time = 0;
       }
     }
 
     const submittingSchedule = !immediateMode && scheduling && !!schedule;
+
     try {
       setSubmitting(true);
+
       await submitTasks(taskRequests, submittingSchedule ? schedule : null);
+
       setSubmitting(false);
 
       if (submittingSchedule) {
@@ -894,6 +1206,7 @@ export function CreateTaskForm({
       }
     } catch (e) {
       setSubmitting(false);
+
       if (submittingSchedule) {
         onFailScheduling && onFailScheduling(e as Error);
       } else {
@@ -904,11 +1217,13 @@ export function CreateTaskForm({
 
   const handleSubmitNow: React.MouseEventHandler = async (ev) => {
     ev.preventDefault();
+
     await handleSubmit(false);
   };
 
   const handleSubmitSchedule: React.FormEventHandler = async (ev) => {
     ev.preventDefault();
+
     await handleSubmit(true);
   };
 
@@ -917,6 +1232,7 @@ export function CreateTaskForm({
 
     if (!favoriteTaskBuffer.name) {
       setFavoriteTaskTitleError(true);
+
       return;
     }
 
@@ -925,19 +1241,27 @@ export function CreateTaskForm({
     if (!submitFavoriteTask) {
       return;
     }
+
     try {
       setSavingFavoriteTask(true);
+
       await submitFavoriteTask(favoriteTaskBuffer);
+
       setSavingFavoriteTask(false);
+
       onSuccessFavoriteTask &&
         onSuccessFavoriteTask(
-          `${!favoriteTaskBuffer.id ? `Created` : `Edited`}  favorite task successfully`,
+          `${!favoriteTaskBuffer.id ? `Created` : `Edited`} favorite task successfully`,
+
           favoriteTaskBuffer,
         );
+
       setOpenFavoriteDialog(false);
+
       setCallToUpdateFavoriteTask(false);
     } catch (e) {
       setSavingFavoriteTask(false);
+
       onFailFavoriteTask && onFailFavoriteTask(e as Error, favoriteTaskBuffer);
     }
   };
@@ -948,19 +1272,27 @@ export function CreateTaskForm({
     if (!deleteFavoriteTask) {
       return;
     }
+
     try {
       setDeletingFavoriteTask(true);
+
       await deleteFavoriteTask(favoriteTaskBuffer);
+
       setDeletingFavoriteTask(false);
+
       onSuccessFavoriteTask &&
         onSuccessFavoriteTask('Deleted favorite task successfully', favoriteTaskBuffer);
 
       setTaskRequests([defaultTask()]);
+
       setOpenFavoriteDialog(false);
+
       setCallToDeleteFavoriteTask(false);
+
       setCallToUpdateFavoriteTask(false);
     } catch (e) {
       setDeletingFavoriteTask(false);
+
       onFailFavoriteTask && onFailFavoriteTask(e as Error, favoriteTaskBuffer);
     }
   };
@@ -969,12 +1301,16 @@ export function CreateTaskForm({
     if (!tasksFromFile) {
       return;
     }
+
     (async () => {
       const newTasks = await tasksFromFile();
+
       if (newTasks.length === 0) {
         return;
       }
+
       setTaskRequests(newTasks);
+
       setSelectedTaskIdx(0);
     })();
   };
@@ -996,11 +1332,13 @@ export function CreateTaskForm({
               <Grid item className={classes.title}>
                 Create Task
               </Grid>
+
               <Grid item>
                 <FormToolbar onSelectFileClick={handleSelectFileClick} />
               </Grid>
             </Grid>
           </DialogTitle>
+
           <DialogContent>
             <Grid container direction="row" wrap="nowrap">
               {SHOW_FAVORITES_UI && showFavorite && (
@@ -1008,6 +1346,7 @@ export function CreateTaskForm({
                   <Typography variant="h6" component="div">
                     Favorite tasks
                   </Typography>
+
                   {favoritesTasks.map((favoriteTask, index) => {
                     return (
                       <FavoriteTask
@@ -1020,11 +1359,15 @@ export function CreateTaskForm({
                         setOpenDialog={setOpenFavoriteDialog}
                         listItemClick={() => {
                           setFavoriteTaskBuffer(favoriteTask);
+
                           setTaskRequests([
                             {
                               category: favoriteTask.category,
+
                               description: favoriteTask.description,
+
                               unix_millis_earliest_start_time: Date.now(),
+
                               priority: favoriteTask.priority,
                             },
                           ]);
@@ -1034,6 +1377,7 @@ export function CreateTaskForm({
                   })}
                 </List>
               )}
+
               {SHOW_FAVORITES_UI && showFavorite && (
                 <Divider
                   orientation="vertical"
@@ -1056,10 +1400,13 @@ export function CreateTaskForm({
                       onChange={handleTaskTypeChange}
                     >
                       <MenuItem value="patrol">Patrol</MenuItem>
+
                       <MenuItem value="clean">Clean</MenuItem>
+
                       <MenuItem value="delivery">Delivery</MenuItem>
                     </TextField>
                   </Grid>
+
                   <Grid item xs={12}>
                     <TextField
                       select
@@ -1070,23 +1417,31 @@ export function CreateTaskForm({
                       SelectProps={{
                         renderValue: (selected) => {
                           const option = getPriorityOption(Number(selected));
+
                           return (
                             <span
                               style={{
                                 display: 'inline-flex',
+
                                 alignItems: 'center',
+
                                 gap: PRIORITY_LABEL_GAP,
                               }}
                             >
                               <span
                                 style={{
                                   width: PRIORITY_DOT_SIZE,
+
                                   height: PRIORITY_DOT_SIZE,
+
                                   borderRadius: '50%',
+
                                   backgroundColor: option.color,
+
                                   display: 'inline-block',
                                 }}
                               />
+
                               {option.label}
                             </span>
                           );
@@ -1094,11 +1449,15 @@ export function CreateTaskForm({
                       }}
                       onChange={(ev) => {
                         const value = Number(ev.target.value);
+
                         taskRequest.priority = { type: 'binary', value };
+
                         setFavoriteTaskBuffer({
                           ...favoriteTaskBuffer,
+
                           priority: { type: 'binary', value },
                         });
+
                         updateTasks();
                       }}
                     >
@@ -1107,19 +1466,26 @@ export function CreateTaskForm({
                           <span
                             style={{
                               display: 'inline-flex',
+
                               alignItems: 'center',
+
                               gap: PRIORITY_LABEL_GAP,
                             }}
                           >
                             <span
                               style={{
                                 width: PRIORITY_DOT_SIZE,
+
                                 height: PRIORITY_DOT_SIZE,
+
                                 borderRadius: '50%',
+
                                 backgroundColor: option.color,
+
                                 display: 'inline-block',
                               }}
                             />
+
                             {option.label}
                           </span>
                         </MenuItem>
@@ -1127,12 +1493,15 @@ export function CreateTaskForm({
                     </TextField>
                   </Grid>
                 </Grid>
+
                 <Divider
                   orientation="horizontal"
                   flexItem
                   style={{ marginTop: theme.spacing(2), marginBottom: theme.spacing(2) }}
                 />
+
                 {renderTaskDescriptionForm()}
+
                 {SHOW_FAVORITES_UI && (
                   <Grid container justifyContent="center">
                     <Button
@@ -1142,6 +1511,7 @@ export function CreateTaskForm({
                       onClick={() => {
                         !callToUpdateFavoriteTask &&
                           setFavoriteTaskBuffer({ ...favoriteTaskBuffer, name: '', id: '' });
+
                         setOpenFavoriteDialog(true);
                       }}
                       style={{ marginTop: theme.spacing(2), marginBottom: theme.spacing(2) }}
@@ -1151,6 +1521,7 @@ export function CreateTaskForm({
                   </Grid>
                 )}
               </Grid>
+
               {taskTitles.length > 1 && (
                 <>
                   <Divider
@@ -1158,6 +1529,7 @@ export function CreateTaskForm({
                     flexItem
                     style={{ marginLeft: theme.spacing(2), marginRight: theme.spacing(2) }}
                   />
+
                   <List dense className={classes.taskList} aria-label="Tasks List">
                     {taskTitles.map((title, idx) => (
                       <ListItem
@@ -1175,6 +1547,7 @@ export function CreateTaskForm({
               )}
             </Grid>
           </DialogContent>
+
           <DialogActions>
             <Button
               variant="outlined"
@@ -1184,6 +1557,7 @@ export function CreateTaskForm({
             >
               Cancel
             </Button>
+
             {!immediateMode && (
               <Button
                 variant="contained"
@@ -1195,6 +1569,7 @@ export function CreateTaskForm({
                 {scheduleToEdit ? 'Edit schedule' : 'Add to Schedule'}
               </Button>
             )}
+
             <Button
               variant="contained"
               type="submit"
@@ -1213,6 +1588,7 @@ export function CreateTaskForm({
           </DialogActions>
         </form>
       </StyledDialog>
+
       {SHOW_FAVORITES_UI && openFavoriteDialog && (
         <ConfirmationDialog
           confirmText={callToDeleteFavoriteTask ? 'Delete' : 'Save'}
@@ -1222,6 +1598,7 @@ export function CreateTaskForm({
           submitting={callToDeleteFavoriteTask ? deletingFavoriteTask : savingFavoriteTask}
           onClose={() => {
             setOpenFavoriteDialog(false);
+
             setCallToDeleteFavoriteTask(false);
           }}
           onSubmit={callToDeleteFavoriteTask ? handleDeleteFavoriteTask : handleSubmitFavoriteTask}
@@ -1237,11 +1614,13 @@ export function CreateTaskForm({
               error={favoriteTaskTitleError}
             />
           )}
+
           {callToDeleteFavoriteTask && (
             <Typography>{`Are you sure you want to delete "${favoriteTaskBuffer.name}"?`}</Typography>
           )}
         </ConfirmationDialog>
       )}
+
       {!immediateMode && openSchedulingDialog && (
         <ConfirmationDialog
           confirmText="Schedule"
@@ -1252,6 +1631,7 @@ export function CreateTaskForm({
           onClose={() => setOpenSchedulingDialog(false)}
           onSubmit={(ev: React.FormEvent) => {
             handleSubmitSchedule(ev);
+
             setOpenSchedulingDialog(false);
           }}
         >
@@ -1262,9 +1642,26 @@ export function CreateTaskForm({
                 onChange={(date) =>
                   date &&
                   setSchedule((prev) => {
-                    date.setHours(schedule.at.getHours());
-                    date.setMinutes(schedule.at.getMinutes());
-                    return { ...prev, startOn: date };
+                    const nextStartOn = new Date(date.valueOf());
+
+                    nextStartOn.setHours(prev.at.getHours());
+
+                    nextStartOn.setMinutes(prev.at.getMinutes());
+
+                    nextStartOn.setSeconds(0, 0);
+
+                    const shouldSyncUntil =
+                      !prev.recurring || !prev.until || isSameDay(prev.until, prev.startOn);
+
+                    return {
+                      ...prev,
+
+                      startOn: nextStartOn,
+
+                      days: prev.recurring ? prev.days : getRecurringDaysForDate(nextStartOn),
+
+                      until: shouldSyncUntil ? endOfDay(nextStartOn) : prev.until,
+                    };
                   })
                 }
                 label="Start On"
@@ -1272,6 +1669,7 @@ export function CreateTaskForm({
                 renderInput={(props) => <TextField {...props} fullWidth />}
               />
             </Grid>
+
             <Grid item xs={6}>
               <TimePicker
                 minutesStep={1}
@@ -1280,12 +1678,17 @@ export function CreateTaskForm({
                   if (!date) {
                     return;
                   }
+
                   setSchedule((prev) => ({ ...prev, at: date }));
+
                   if (!isNaN(date.valueOf())) {
                     setSchedule((prev) => {
                       const startOn = prev.startOn;
+
                       startOn.setHours(date.getHours());
+
                       startOn.setMinutes(date.getMinutes());
+
                       return { ...prev, startOn };
                     });
                   }
@@ -1295,6 +1698,7 @@ export function CreateTaskForm({
                 renderInput={(props) => <TextField {...props} fullWidth />}
               />
             </Grid>
+
             <Grid item xs={6}>
               <TimePicker
                 minutesStep={1}
@@ -1303,6 +1707,7 @@ export function CreateTaskForm({
                   if (!date) {
                     return;
                   }
+
                   setSchedule((prev) => ({ ...prev, plannedEndAt: date }));
                 }}
                 label="Planned end"
@@ -1310,22 +1715,62 @@ export function CreateTaskForm({
                 renderInput={(props) => <TextField {...props} fullWidth />}
               />
             </Grid>
+
             <Grid item xs={12}>
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={schedule.recurring}
-                    disabled={!scheduleEnabled}
-                    onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
-                      setSchedule((prev) => ({ ...prev, recurring: event.target.checked }))
+              <FormControl fullWidth>
+                <FormHelperText>Schedule type</FormHelperText>
+
+                <RadioGroup
+                  row
+                  value={
+                    schedule.recurring ? ScheduleTypeValue.RECURRING : ScheduleTypeValue.ONE_TIME
+                  }
+                  onChange={(event: React.ChangeEvent<HTMLInputElement>) => {
+                    const recurring = event.target.value === ScheduleTypeValue.RECURRING;
+
+                    setSchedule((prev) => ({
+                      ...prev,
+
+                      recurring,
+
+                      days:
+                        recurring && !hasSelectedRecurringDay(prev.days)
+                          ? getRecurringDaysForDate(prev.startOn)
+                          : prev.days,
+
+                      until: recurring
+                        ? scheduleUntilValue === ScheduleUntilValue.ON
+                          ? prev.until ?? endOfDay(prev.startOn)
+                          : undefined
+                        : endOfDay(prev.startOn),
+                    }));
+
+                    if (!recurring) {
+                      setScheduleUntilValue(ScheduleUntilValue.ON);
                     }
+                  }}
+                >
+                  <FormControlLabel
+                    value={ScheduleTypeValue.ONE_TIME}
+                    control={<Radio />}
+                    disabled={!scheduleEnabled}
+                    label="One-time"
                   />
-                }
-                label="Recurring"
-              />
+
+                  <FormControlLabel
+                    value={ScheduleTypeValue.RECURRING}
+                    control={<Radio />}
+                    disabled={!scheduleEnabled}
+                    label="Recurring"
+                  />
+                </RadioGroup>
+              </FormControl>
             </Grid>
+
             {schedule.recurring && (
               <Grid item xs={12}>
+                <FormHelperText>Repeat on</FormHelperText>
+
                 <DaySelectorSwitch
                   value={schedule.days}
                   disabled={!scheduleEnabled}
@@ -1334,13 +1779,17 @@ export function CreateTaskForm({
               </Grid>
             )}
           </Grid>
+
           <Grid container marginTop={theme.spacing(1)} marginLeft={theme.spacing(0)}>
             <FormControl fullWidth={true}>
-              <FormHelperText>Ends</FormHelperText>
+              <FormHelperText>
+                {schedule.recurring ? 'Recurring ends' : 'One-time run date'}
+              </FormHelperText>
+
               <RadioGroup
                 aria-labelledby="controlled-radio-buttons-group"
                 name="controlled-radio-buttons-group"
-                value={scheduleUntilValue}
+                value={schedule.recurring ? scheduleUntilValue : ScheduleUntilValue.ON}
                 onChange={handleScheduleUntilValue}
                 row
               >
@@ -1348,26 +1797,34 @@ export function CreateTaskForm({
                   <FormControlLabel
                     value={ScheduleUntilValue.NEVER}
                     control={<Radio />}
+                    disabled={!scheduleEnabled || !schedule.recurring}
                     label="Never"
                   />
                 </Grid>
+
                 <Grid item xs={2} paddingLeft={theme.spacing(1)}>
-                  <FormControlLabel value={ScheduleUntilValue.ON} control={<Radio />} label="On" />
+                  <FormControlLabel
+                    value={ScheduleUntilValue.ON}
+                    control={<Radio />}
+                    disabled={!scheduleEnabled || !schedule.recurring}
+                    label="On"
+                  />
                 </Grid>
+
                 <Grid item xs={4}>
                   <DatePicker
-                    value={
-                      scheduleUntilValue === ScheduleUntilValue.NEVER ? new Date() : schedule.until
-                    }
+                    value={schedule.until ?? endOfDay(schedule.startOn)}
                     onChange={(date) =>
                       date &&
                       setSchedule((prev) => {
-                        date.setHours(23);
-                        date.setMinutes(59);
-                        return { ...prev, until: date };
+                        return { ...prev, until: endOfDay(date) };
                       })
                     }
-                    disabled={scheduleUntilValue !== ScheduleUntilValue.ON}
+                    disabled={
+                      !scheduleEnabled ||
+                      !schedule.recurring ||
+                      scheduleUntilValue !== ScheduleUntilValue.ON
+                    }
                     renderInput={(props) => <TextField {...props} fullWidth />}
                   />
                 </Grid>
