@@ -20,6 +20,13 @@ import {
 } from 'date-fns';
 import { getShortDescription, RecurringDays, Schedule } from 'react-components';
 
+const getPlannedEnd = (startTime: Date, plannedEndAt: string): Date => {
+  const [hours, minutes] = plannedEndAt.split(':').map((value: string) => Number(value));
+  const plannedEnd = new Date(startTime);
+  plannedEnd.setHours(hours, minutes, 0, 0);
+  return plannedEnd;
+};
+
 /**
  * Generates a list of ProcessedEvents to occur within the query start and end,
  * based on the provided schedule.
@@ -109,9 +116,12 @@ export const scheduleToEvents = (
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const schedId = (schedule as any)?.id;
         const title = schedId != null ? `[S:${schedId}] ${baseTitle}` : baseTitle;
+        const end = schedule.planned_end_at
+          ? getPlannedEnd(cur, schedule.planned_end_at)
+          : addMinutes(cur, 45);
         events.push({
           start: cur,
-          end: addMinutes(cur, 45),
+          end,
           event_id: getEventId(),
           title,
         });
