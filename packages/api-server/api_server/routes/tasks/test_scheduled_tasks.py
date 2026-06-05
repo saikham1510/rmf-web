@@ -624,7 +624,7 @@ class TestScheduledTasksRoute(AppFixture):
         self.assertFalse(dispatched)
         self.assertEqual(0, len(captured_requests))
 
-    def test_try_dispatch_chained_schedule_run_allows_clean_category(self):
+    def test_try_dispatch_chained_schedule_run_never_chains_clean_category(self):
         portal = self.get_portal()
 
         async def create_schedule() -> int:
@@ -687,13 +687,8 @@ class TestScheduledTasksRoute(AppFixture):
 
             dispatched = portal.call(run_chain)
 
-        self.assertTrue(dispatched)
-        self.assertEqual(1, len(captured_requests))
-        request_payload = captured_requests[0].request
-        self.assertEqual("clean", request_payload.category)
-        self.assertIn(
-            "scheduled_schedule_id=" + str(schedule_id), request_payload.labels
-        )
+        self.assertFalse(dispatched)
+        self.assertEqual(0, len(captured_requests))
 
     def test_cancel_active_scheduled_task_if_overdue_cancels_live_task(self):
         portal = self.get_portal()

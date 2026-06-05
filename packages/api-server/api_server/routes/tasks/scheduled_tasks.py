@@ -58,6 +58,8 @@ ACTIVE_SCHEDULED_TASK_STATUSES = {
     TaskStatus.blocked,
 }
 
+NON_CHAINABLE_SCHEDULED_TASK_CATEGORIES = {"clean"}
+
 
 def _dedupe_labels(labels: Iterable[str]) -> list[str]:
     seen: set[str] = set()
@@ -226,6 +228,14 @@ async def try_dispatch_chained_schedule_run(
 
     task_request_data = _parse_task_request_dict(parent_task.task_request)
     category = task_request_data.get("category")
+    if category in NON_CHAINABLE_SCHEDULED_TASK_CATEGORIES:
+        logger.info(
+            "chain: schedule_id=%s skip category=%s because it is single-run only",
+            schedule_row.get_id(),
+            category,
+        )
+        return False
+
     if category not in allowed_categories:
         logger.info(
             "chain: schedule_id=%s skip category=%s not in allowed set",
