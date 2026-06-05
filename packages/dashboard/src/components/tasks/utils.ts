@@ -124,13 +124,18 @@ export const toApiSchedule = (
 
   // Use the picked date/time as the first eligible occurrence.
   const start_from = start.toISOString();
+  const fallbackUntil = new Date(start.valueOf());
+  fallbackUntil.setHours(23, 59, 0, 0);
   const until = schedule.until?.toISOString();
-  const planned_end_at = schedule.plannedEndAt
-    ? `${schedule.plannedEndAt.getHours().toString().padStart(2, '0')}:${schedule.plannedEndAt
-        .getMinutes()
-        .toString()
-        .padStart(2, '0')}`
-    : undefined;
+  const oneTimeUntil = (schedule.until ?? fallbackUntil).toISOString();
+  const isCleanTask = taskRequest.category === 'clean';
+  const planned_end_at =
+    !isCleanTask && schedule.plannedEndAt
+      ? `${schedule.plannedEndAt.getHours().toString().padStart(2, '0')}:${schedule.plannedEndAt
+          .getMinutes()
+          .toString()
+          .padStart(2, '0')}`
+      : undefined;
   const scheduledTaskRequest: TaskRequest = {
     ...taskRequest,
     unix_millis_earliest_start_time: start.valueOf(),
@@ -140,9 +145,8 @@ export const toApiSchedule = (
   const localHours = start.getHours().toString().padStart(2, '0');
   const localMinutes = start.getMinutes().toString().padStart(2, '0');
   const at = `${localHours}:${localMinutes}`;
-  const recurring = schedule.recurring ?? true;
-  const oneOffUntil = start.toISOString();
-  const scheduleUntil = recurring ? until : oneOffUntil;
+  const recurring = schedule.recurring;
+  const scheduleUntil = recurring ? until : oneTimeUntil;
   if (!recurring) {
     const periodByDay = [
       'monday',
