@@ -822,6 +822,7 @@ export function CreateTaskForm({
   const [submitting, setSubmitting] = React.useState(false);
   const [formFullyFilled, setFormFullyFilled] = React.useState(requestTask !== undefined || false);
   const taskRequest = taskRequests[selectedTaskIdx];
+  const isCleanTask = taskRequest.category === 'clean';
   const [openSchedulingDialog, setOpenSchedulingDialog] = React.useState(false);
   const [schedule, setSchedule] = React.useState<Schedule>(() => {
     if (immediateMode) {
@@ -858,6 +859,17 @@ export function CreateTaskForm({
         : ScheduleUntilValue.NEVER
       : ScheduleUntilValue.ON;
   });
+
+  React.useEffect(() => {
+    if (!isCleanTask) {
+      return;
+    }
+
+    setSchedule((prev) => ({
+      ...prev,
+      plannedEndAt: undefined,
+    }));
+  }, [isCleanTask]);
 
   const handleScheduleUntilValue = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.value === ScheduleUntilValue.ON) {
@@ -1411,7 +1423,7 @@ export function CreateTaskForm({
               />
             </Grid>
 
-            <Grid item xs={6}>
+            <Grid item xs={isCleanTask ? 12 : 6}>
               <TimePicker
                 minutesStep={1}
                 value={schedule.at}
@@ -1439,23 +1451,24 @@ export function CreateTaskForm({
                 renderInput={(props) => <TextField {...props} fullWidth />}
               />
             </Grid>
+            {!isCleanTask && (
+              <Grid item xs={6}>
+                <TimePicker
+                  minutesStep={1}
+                  value={schedule.plannedEndAt ?? defaultPlannedEnd(schedule.at)}
+                  onChange={(date) => {
+                    if (!date) {
+                      return;
+                    }
 
-            <Grid item xs={6}>
-              <TimePicker
-                minutesStep={1}
-                value={schedule.plannedEndAt ?? defaultPlannedEnd(schedule.at)}
-                onChange={(date) => {
-                  if (!date) {
-                    return;
-                  }
-
-                  setSchedule((prev) => ({ ...prev, plannedEndAt: date }));
-                }}
-                label="Planned end"
-                disabled={!scheduleEnabled}
-                renderInput={(props) => <TextField {...props} fullWidth />}
-              />
-            </Grid>
+                    setSchedule((prev) => ({ ...prev, plannedEndAt: date }));
+                  }}
+                  label="Planned end"
+                  disabled={!scheduleEnabled}
+                  renderInput={(props) => <TextField {...props} fullWidth />}
+                />
+              </Grid>
+            )}
 
             <Grid item xs={12}>
               <FormControl fullWidth>
