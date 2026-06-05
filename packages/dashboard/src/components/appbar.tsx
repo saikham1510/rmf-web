@@ -65,6 +65,7 @@ import { formatDistance } from 'date-fns';
 import { useCreateTaskFormData } from '../hooks/useCreateTaskForm';
 import { toApiSchedule } from './tasks/utils';
 import useGetUsername from '../hooks/useFetchUser';
+import { getScheduleSubmitErrorMessage } from './utils';
 
 export type TabValue = 'infrastructure' | 'robots' | 'tasks' | 'custom1' | 'custom2' | 'admin';
 
@@ -942,7 +943,7 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
             showAlert('success', 'Successfully created schedule');
           }}
           onFailScheduling={(e) => {
-            showAlert('error', `Failed to submit schedule: ${e.message}`);
+            showAlert('error', getScheduleSubmitErrorMessage(e));
           }}
         />
       )}
