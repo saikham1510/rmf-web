@@ -26,6 +26,7 @@ import useGetUsername from '../../hooks/useFetchUser';
 import { AppControllerContext } from '../app-contexts';
 import { AppEvents } from '../app-events';
 import { RmfAppContext } from '../rmf-app';
+import { getScheduleSubmitErrorMessage } from '../utils';
 import { parseTasksFile, toApiSchedule } from './utils';
 import {
   apiScheduleToSchedule,
@@ -565,7 +566,7 @@ export const TaskSchedule = () => {
             showAlert('success', 'Successfully created schedule');
           }}
           onFailScheduling={(e) => {
-            showAlert('error', `Failed to submit schedule: ${e.message}`);
+            showAlert('error', getScheduleSubmitErrorMessage(e));
           }}
         />
       )}

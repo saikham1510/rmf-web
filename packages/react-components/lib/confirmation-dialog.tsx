@@ -30,6 +30,7 @@ export interface ConfirmationDialogProps extends DialogProps {
   title?: string;
   confirmText?: string;
   cancelText?: string;
+  confirmDisabled?: boolean;
   // disable the dialog actions and shows a loading indicator
   submitting?: boolean;
   classes?: DialogActionsProps['classes'] & { button: string };
@@ -41,6 +42,7 @@ export function ConfirmationDialog({
   title = 'Confirm',
   confirmText = 'OK',
   cancelText = 'Cancel',
+  confirmDisabled = false,
   submitting = false,
   classes,
   onSubmit,
@@ -80,7 +82,7 @@ export function ConfirmationDialog({
             variant="contained"
             type="submit"
             color="primary"
-            disabled={submitting}
+            disabled={submitting || confirmDisabled}
             className={clsx(dialogClasses.actionBtn, classes?.button)}
           >
             <Loading hideChildren loading={submitting} size="1.5em" color="inherit">
