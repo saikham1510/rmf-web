@@ -476,6 +476,53 @@ async def _cancel_overdue_schedule_tasks(
         )
 
 
+async def _trigger_post_task_recovery(task_state, schedule_row, task_repo, now_utc):
+    logger.error("🔥 POST RECOVERY TRIGGERED task_id=%s", task_state.booking.id)
+    task_id = task_state.booking.id
+
+    logger.info("RECOVERY_TRIGGERED task_id=%s", task_id)
+
+    # 1. Fetch all tasks for this schedule
+    label = Labels.from_strings([f"scheduled_schedule_id={schedule_row.get_id()}"])
+
+    states = await task_repo.query_task_states(label=label)
+
+    # 2. Determine what is done vs not done (you already have phases/events)
+    completed = []
+    skipped = []
+
+    for s in states:
+        if s.unix_millis_finish_time:
+            completed.append(s.booking.id)
+        else:
+            skipped.append(s.booking.id)
+
+    # 3. Mark skipped ones logically (NOT RMF cancel)
+    logger.info("completed=%s skipped=%s", completed, skipped)
+
+    # 4. Decide recovery action
+    robot_name = getattr(task_state.assigned_to, "name", None)
+
+    if robot_name:
+        await _dispatch_return_to_charger(robot_name)
+
+
+async def _dispatch_return_to_charger(robot_name: str):
+
+    logger.info("RETURN_TO_CHARGER robot=%s", robot_name)
+
+    request = {
+        "type": "dispatch_task_request",
+        "request": {
+            "category": "go_to_place",
+            "description": {"place_name": "charger"},
+            "robot_name": robot_name,
+        },
+    }
+
+    await tasks_service().call(json.dumps(request))
+
+
 async def cancel_active_scheduled_task_if_overdue(
     schedule_row: ttm.ScheduledTaskSchedule,
     task_state,
@@ -483,6 +530,7 @@ async def cancel_active_scheduled_task_if_overdue(
     now_utc: datetime,
 ) -> bool:
     """Cancel a live scheduled task if the schedule window has already closed."""
+
     if schedule_row.scheduled_task is None:
         return False
 
@@ -505,6 +553,15 @@ async def cancel_active_scheduled_task_if_overdue(
             "scheduled_end_time_auto_cancel",
         ],
     )
+    logger.info(
+        "CANCEL_CHECK_ENTER schedule_id=%s task_id=%s status=%s now=%s planned_end=%s",
+        schedule_row.get_id(),
+        task_state.booking.id,
+        task_state.status,
+        now_utc,
+        schedule_row.planned_end_at,
+    )
+
     try:
         logger.info(
             "canceling active scheduled task schedule_id=%s task_id=%s status=%s",
@@ -513,6 +570,15 @@ async def cancel_active_scheduled_task_if_overdue(
             task_state.status,
         )
         await tasks_service().call(cancel_request.model_dump_json(exclude_none=True))
+        logger.error(
+            " CANCEL SUCCESS task_id=%s",
+            task_state.booking.id,
+        )
+        await _trigger_post_task_recovery(task_state, schedule_row, task_repo, now_utc)
+        logger.error(
+            " RECOVERY FINISHED task_id=%s",
+            task_state.booking.id,
+        )
         return True
     except Exception:
         logger.exception(
