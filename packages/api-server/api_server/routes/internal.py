@@ -30,10 +30,14 @@ def _env_bool(name: str, default: bool) -> bool:
 def _env_category_allowlist() -> set[str]:
     # Default behavior chains recurring task categories that are typically
     # schedule-driven. Delivery is intentionally excluded by default because
-    # deployments often treat it as ad-hoc demand work.
-    raw = os.getenv("RMF_CHAIN_ALLOWED_CATEGORIES", "patrol,clean,loop,compose")
-    result = {x.strip() for x in raw.split(",") if x.strip()}
-    return result or {"patrol", "clean", "loop", "compose"}
+    # deployments often treat it as ad-hoc demand work. Clean tasks are also
+    # excluded: a scheduled clean dispatch represents one cleaning run, and the
+    # robot's finishing task should complete the workflow without immediately
+    # dispatching another clean job.
+    raw = os.getenv("RMF_CHAIN_ALLOWED_CATEGORIES", "patrol,loop,compose")
+    result = {x.strip().lower() for x in raw.split(",") if x.strip()}
+    result -= scheduled_tasks_route.NON_CHAINABLE_SCHEDULED_TASK_CATEGORIES
+    return result or {"patrol", "loop", "compose"}
 
 
 # Scheduled task chaining is always enabled; the allow-list still controls
