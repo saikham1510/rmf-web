@@ -35,7 +35,8 @@ def _env_category_allowlist() -> set[str]:
     # robot's finishing task should complete the workflow without immediately
     # dispatching another clean job.
     raw = os.getenv("RMF_CHAIN_ALLOWED_CATEGORIES", "patrol,loop,compose")
-    result = {x.strip() for x in raw.split(",") if x.strip()}
+    result = {x.strip().lower() for x in raw.split(",") if x.strip()}
+    result -= scheduled_tasks_route.NON_CHAINABLE_SCHEDULED_TASK_CATEGORIES
     return result or {"patrol", "loop", "compose"}
 
 

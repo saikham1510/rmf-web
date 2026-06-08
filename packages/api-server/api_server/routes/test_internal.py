@@ -8,6 +8,13 @@ from api_server.test import AppFixture, make_task_state
 
 
 class TestInternalRoute(AppFixture):
+    def test_env_category_allowlist_normalizes_and_excludes_clean(self):
+        with patch.dict(
+            "os.environ",
+            {"RMF_CHAIN_ALLOWED_CATEGORIES": "patrol, clean, LOOP"},
+        ):
+            self.assertEqual({"patrol", "loop"}, internal._env_category_allowlist())
+
     def test_completed_task_triggers_scheduled_task_chain_hook(self):
         portal = self.get_portal()
 
