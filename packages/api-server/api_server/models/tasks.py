@@ -28,6 +28,7 @@ class ScheduledTaskSchedule(BaseModel):
     until: datetime | None = None
     planned_end_at: str | None = None
     actual_end_time: str | None = None
+    actual_end_iso: str | None = None
     period: Period
     at: str | None = None
     dispatched: bool = False

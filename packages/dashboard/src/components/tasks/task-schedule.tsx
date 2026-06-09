@@ -148,6 +148,9 @@ export const TaskSchedule = () => {
           params.start.toISOString(),
         )
       ).data;
+      // Debug: log raw tasks returned from API for easier inspection in browser console
+      // eslint-disable-next-line no-console
+      console.debug('getRemoteEvents: scheduled_tasks response', tasks);
       let counter = 0;
       const getEventId = () => {
         return counter++;

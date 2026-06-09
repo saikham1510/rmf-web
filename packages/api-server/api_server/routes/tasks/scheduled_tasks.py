@@ -5,7 +5,7 @@ import threading
 import time as pytime
 import traceback
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import schedule
@@ -34,6 +34,7 @@ from api_server.models import tortoise_models as ttm
 from api_server.models.labels import Labels
 from api_server.repositories import TaskRepository
 from api_server.rmf_io import tasks_service
+from api_server.ros import ros_node
 from api_server.utils.schedule_utils import (
     _occurrence_allowed,
     compute_next_run,
@@ -42,6 +43,7 @@ from api_server.utils.schedule_utils import (
 from api_server.utils.time_utils import (
     datetime_to_wall_millis,
     now_wall_millis,
+    sim_to_real,
     wall_millis_to_datetime,
 )
 
@@ -177,14 +179,76 @@ async def update_completed_clean_schedule_end(
     if _normalized_category(task_request_data.get("category")) != "clean":
         return False
 
-    local_tz = datetime.now().astimezone().tzinfo
-    finish_dt = wall_millis_to_datetime(task_state.unix_millis_finish_time).astimezone(
-        local_tz
+    # Compute finish time in UTC. If the finish timestamp looks like simulation time (small number),
+    # convert it to real wall-clock using ROS clock offsets.
+    finish_ms = task_state.unix_millis_finish_time
+    finish_dt_utc = None
+    try:
+        if finish_ms is None:
+            return False
+        # Heuristic: if timestamp is too small to be real unix ms (before ~2002), treat as sim time
+        if int(finish_ms) < 1_000_000_000_000:
+            node = ros_node()
+            if node is not None:
+                try:
+                    now_sim = node.get_clock().now().nanoseconds // 1_000_000
+                    now_real = int(pytime.time() * 1000)
+                    real_ms = sim_to_real(int(finish_ms), int(now_sim), int(now_real))
+                    finish_dt_utc = wall_millis_to_datetime(real_ms)
+                except Exception:
+                    logger.exception("failed to convert sim time to real time")
+        if finish_dt_utc is None:
+            finish_dt_utc = wall_millis_to_datetime(int(finish_ms))
+    except Exception:
+        logger.exception("invalid finish timestamp")
+        return False
+
+    # Try to align the recorded end time to the schedule's original timezone
+    actual_time_str = None
+    try:
+        logger.info(
+            "update_completed_clean_schedule_end called schedule_id=%s start_from=%s at=%s unix_finish=%s",
+            schedule_row.get_id(),
+            getattr(schedule_row, "start_from", None),
+            getattr(schedule_row, "at", None),
+            getattr(task_state, "unix_millis_finish_time", None),
+        )
+        if schedule_row.start_from and schedule_row.at:
+            # Determine offset between stored start_from (UTC) and the original 'at' hour
+            s = schedule_row.start_from
+            if s.tzinfo is None:
+                s = s.replace(tzinfo=timezone.utc)
+            s_utc = s.astimezone(timezone.utc)
+            at_h = int(str(schedule_row.at).split(":")[0])
+            # Compute offset hours (may be negative); keep minutes in account
+            offset_hours = at_h - s_utc.hour
+            # Apply offset to UTC finish to get a wall-clock hour consistent with schedule.at
+            adjusted = finish_dt_utc + timedelta(hours=offset_hours)
+            actual_time_str = adjusted.strftime("%H:%M")
+        else:
+            # Fallback: use server local timezone
+            local_tz = datetime.now().astimezone().tzinfo
+            finish_dt = finish_dt_utc.astimezone(local_tz)
+            actual_time_str = finish_dt.strftime("%H:%M")
+    except Exception:
+        # On any failure, fallback to server local
+        local_tz = datetime.now().astimezone().tzinfo
+        finish_dt = finish_dt_utc.astimezone(local_tz)
+        actual_time_str = finish_dt.strftime("%H:%M")
+        logger.exception("failed to align actual_end_time, falling back to local time")
+
+    schedule_row.planned_end_at = actual_time_str
+    # Also update actual_end_time and actual_end_iso for clean tasks to support frontend display
+    schedule_row.actual_end_time = actual_time_str
+    schedule_row.actual_end_iso = finish_dt_utc.replace(tzinfo=timezone.utc).isoformat()
+    await schedule_row.save(
+        update_fields=["planned_end_at", "actual_end_time", "actual_end_iso"]
     )
-    schedule_row.planned_end_at = finish_dt.strftime("%H:%M")
-    # Also update actual_end_time for clean tasks to support frontend display
-    schedule_row.actual_end_time = schedule_row.planned_end_at
-    await schedule_row.save(update_fields=["planned_end_at", "actual_end_time"])
+    logger.info(
+        "saved actual_end_time=%s for schedule_id=%s",
+        actual_time_str,
+        schedule_row.get_id(),
+    )
     logger.info(
         "updated completed scheduled clean end schedule_id=%s task_id=%s planned_end_at=%s",
         schedule_row.get_id(),
@@ -887,6 +951,22 @@ async def get_scheduled_tasks(
     results = await q
     await ttm.ScheduledTask.fetch_for_list(results)
     logger.info("scheduled task calendar query returned %s tasks", len(results))
+    # Quick debug: log schedule end fields to help frontend verification
+    try:
+        for r in results:
+            await r.fetch_related("schedules")
+            for s in r.schedules:
+                logger.info(
+                    "schedule_debug task_id=%s schedule_id=%s planned_end_at=%s actual_end_time=%s actual_end_iso=%s dispatched=%s",
+                    getattr(r, "id", None),
+                    getattr(s, "_id", None),
+                    getattr(s, "planned_end_at", None),
+                    getattr(s, "actual_end_time", None),
+                    getattr(s, "actual_end_iso", None),
+                    getattr(s, "dispatched", None),
+                )
+    except Exception:
+        logger.exception("failed to log schedule_debug info")
     return [ScheduledTask.model_validate(x) for x in results]
 
 
