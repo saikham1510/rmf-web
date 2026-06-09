@@ -171,6 +171,10 @@ async def process_msg(msg: Dict[str, Any], fleet_repo: FleetRepository) -> None:
                         _id=schedule_id
                     ).select_related("scheduled_task")
                     if schedule_row and schedule_row.scheduled_task:
+                        await scheduled_tasks_route.update_completed_clean_schedule_end(
+                            schedule_row,
+                            task_state,
+                        )
                         await scheduled_tasks_route.try_dispatch_chained_schedule_run(
                             schedule_row,
                             task_repo,

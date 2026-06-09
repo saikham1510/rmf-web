@@ -164,6 +164,34 @@ def _build_request_for_schedule_dispatch(
     return task_request
 
 
+async def update_completed_clean_schedule_end(
+    schedule_row: ttm.ScheduledTaskSchedule,
+    task_state,
+) -> bool:
+    """Store a scheduled clean task's actual finish time as its calendar end."""
+    parent_task = schedule_row.scheduled_task
+    if parent_task is None or task_state.unix_millis_finish_time is None:
+        return False
+
+    task_request_data = _parse_task_request_dict(parent_task.task_request)
+    if _normalized_category(task_request_data.get("category")) != "clean":
+        return False
+
+    local_tz = datetime.now().astimezone().tzinfo
+    finish_dt = wall_millis_to_datetime(task_state.unix_millis_finish_time).astimezone(
+        local_tz
+    )
+    schedule_row.planned_end_at = finish_dt.strftime("%H:%M")
+    await schedule_row.save(update_fields=["planned_end_at"])
+    logger.info(
+        "updated completed scheduled clean end schedule_id=%s task_id=%s planned_end_at=%s",
+        schedule_row.get_id(),
+        task_state.booking.id,
+        schedule_row.planned_end_at,
+    )
+    return True
+
+
 async def _dispatch_schedule_task_request(
     schedule_row: ttm.ScheduledTaskSchedule,
     task_repo: TaskRepository,
