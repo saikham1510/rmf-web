@@ -55,6 +55,8 @@ class ScheduledTaskSchedule(Model):
     planned_end_at = CharField(255, null=True)
     period = CharEnumField(Period)
     at = CharField(255, null=True)
+    # Actual end time for a schedule (HH:MM) recorded when a run completes (used by frontend)
+    actual_end_time = CharField(255, null=True)
     dispatched = BooleanField(
         default=False
     )  # Legacy field, kept for backwards compatibility

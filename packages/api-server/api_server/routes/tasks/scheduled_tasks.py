@@ -182,7 +182,9 @@ async def update_completed_clean_schedule_end(
         local_tz
     )
     schedule_row.planned_end_at = finish_dt.strftime("%H:%M")
-    await schedule_row.save(update_fields=["planned_end_at"])
+    # Also update actual_end_time for clean tasks to support frontend display
+    schedule_row.actual_end_time = schedule_row.planned_end_at
+    await schedule_row.save(update_fields=["planned_end_at", "actual_end_time"])
     logger.info(
         "updated completed scheduled clean end schedule_id=%s task_id=%s planned_end_at=%s",
         schedule_row.get_id(),
