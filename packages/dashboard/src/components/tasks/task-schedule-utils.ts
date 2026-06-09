@@ -20,6 +20,8 @@ import {
 } from 'date-fns';
 import { getShortDescription, RecurringDays, Schedule } from 'react-components';
 
+export const DEFAULT_CLEAN_EVENT_DURATION_MINUTES = 45;
+
 const getPlannedEnd = (startTime: Date, plannedEndAt: string): Date => {
   const [hours, minutes] = plannedEndAt.split(':').map((value: string) => Number(value));
   const plannedEnd = new Date(startTime);
@@ -112,14 +114,40 @@ export const scheduleToEvents = (
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const schedId = (schedule as any)?.id;
         const title = schedId != null ? `[S:${schedId}] ${baseTitle}` : baseTitle;
-        const end = schedule.planned_end_at
-          ? getPlannedEnd(cur, schedule.planned_end_at)
-          : addMinutes(cur, 45);
+        let displayEnd: Date | null = null;
+        let usesFallbackEnd = false;
+
+        if (taskType === 'patrol' && schedule.planned_end_at) {
+          displayEnd = getPlannedEnd(cur, schedule.planned_end_at);
+          usesFallbackEnd = false;
+        } else if (taskType === 'clean') {
+          // For cleaning tasks, use actual_end_time from schedule if available or null
+          // This should be the true end time after task completion
+          // Here assumed actual_end_time field; fallback is null
+          const actualEndTimeStr = (schedule as any).actual_end_time || null;
+          if (actualEndTimeStr) {
+            displayEnd = getPlannedEnd(cur, actualEndTimeStr);
+            usesFallbackEnd = false;
+          } else {
+            displayEnd = null;
+            usesFallbackEnd = true;
+          }
+        } else {
+          // For other task types fallback to planned_end_at if exists
+          displayEnd = schedule.planned_end_at ? getPlannedEnd(cur, schedule.planned_end_at) : null;
+          usesFallbackEnd = false;
+        }
+
+        const end = displayEnd ?? addMinutes(cur, DEFAULT_CLEAN_EVENT_DURATION_MINUTES);
+
         events.push({
           start: cur,
           end,
           event_id: getEventId(),
           title,
+          type: taskType,
+          displayEnd,
+          usesFallbackEnd,
         });
       }
     }
