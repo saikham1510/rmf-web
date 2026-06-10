@@ -572,32 +572,18 @@ async def _dispatch_return_to_charger(robot_name: str):
     CHARGER_MAP = {
         "TinyRobot1": "tinyRobot1_charger",
     }
+    charger_place = CHARGER_MAP.get(robot_name)
 
     logger.info("RETURN_TO_CHARGER robot=%s", robot_name)
 
-    if robot_name not in CHARGER_MAP:
-        logger.error("UNKNOWN_ROBOT_CANNOT_RETURN robot=%s", robot_name)
-        return
-
-    charger_place = CHARGER_MAP.get(robot_name)
-    if not charger_place:
-        logger.error(
-            "NO_CHARGER_MAPPED robot=%s CHARGER_MAP=%s",
-            robot_name,
-            CHARGER_MAP,
-        )
-        return
-    if robot_name in _recovery_dispatched:
-        logger.info("ALREADY_DISPATCHED robot=%s", robot_name)
-        return
-
-    _recovery_dispatched.add(robot_name)
-
     request_payload = {
         "type": "robot_task_request",
+        "robot": robot_name,
+        "fleet": "TinyRobot",
         "request": {
             "category": "go_to_place",
             "description": {"place_name": charger_place},
+            "unix_millis_earliest_start_time": now_wall_millis(),
             "unix_millis_request_time": now_wall_millis(),
             "labels": ["auto_return_to_charger"],
         },
