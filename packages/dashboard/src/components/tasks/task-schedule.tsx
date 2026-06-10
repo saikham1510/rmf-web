@@ -436,6 +436,58 @@ export const TaskSchedule = () => {
     patrol: '#3b82f6',
   };
 
+  // Helper viewer component that renders our custom time line and hides the
+  // scheduler's original header sibling element via DOM traversal. Placed
+  // here (outside of JSX) to allow hooks.
+  const ViewerExtra = ({ event }: { event: ProcessedEvent }) => {
+    const ref = React.useRef<HTMLDivElement | null>(null);
+    React.useEffect(() => {
+      try {
+        const el = ref.current?.previousElementSibling as HTMLElement | null;
+        if (el) {
+          el.style.display = 'none';
+        }
+      } catch (e) {
+        // ignore
+      }
+    }, [ref, event]);
+
+    const displayEnd = event.displayEnd instanceof Date ? event.displayEnd : null;
+    const startStr = formatScheduleViewerDate(event.start);
+    const endStr = displayEnd ? formatScheduleViewerDate(displayEnd) : 'TBA';
+    return (
+      <div
+        ref={ref}
+        style={{
+          padding: '0 16px 12px',
+          fontSize: 12,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            aria-hidden="true"
+          >
+            <path
+              fill="#555"
+              d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 14H5V9h14v9z"
+            />
+          </svg>
+          <div
+            style={{ color: '#444' }}
+          >{`${startStr}${displayEnd ? ` - ${endStr}` : ' - TBA'}`}</div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <>
       <input
@@ -479,100 +531,110 @@ export const TaskSchedule = () => {
       {/* Persistent grouped table panel */}
       <ScheduleRunsPanel />
 
-      <Scheduler
-        // react-scheduler does not support refreshing, workaround by mounting a new instance.
+      <div className="rmf-scheduler-wrapper">
+        <style>{`
+          /* Hide react-scheduler's built-in viewer time/date line so we render our own. */
+          .rmf-scheduler-wrapper .rs-viewer__header .rs-viewer__dates,
+          .rmf-scheduler-wrapper .rs-viewer__header .rs-viewer__time,
+          .rmf-scheduler-wrapper .rs-viewer__header .rs-viewer__title,
+          .rmf-scheduler-wrapper .rs__viewer__header .rs__viewer__dates,
+          .rmf-scheduler-wrapper .rs__viewer__header .rs__viewer__time {
+            display: none !important;
+          }
+        `}</style>
+        {/* viewer placeholder (actual component declared above) */}
+        <Scheduler
+          // react-scheduler does not support refreshing, workaround by mounting a new instance.
 
-        key={`scheduler-${refreshTaskAppCount}`}
-        view="week"
-        month={{
-          weekDays: [0, 1, 2, 3, 4, 5, 6],
-          weekStartOn: 1,
-          startHour: 0,
-          endHour: 23,
-          cellRenderer: ({ start, ...props }: CellRenderedProps) =>
-            disablingCellsWithoutEvents(calendarEvents, { start, ...props }),
-        }}
-        week={{
-          weekDays: [0, 1, 2, 3, 4, 5, 6],
-          weekStartOn: 1,
-          startHour: 0,
-          endHour: 23,
-          step: 60,
-          cellRenderer: ({ start, ...props }: CellRenderedProps) =>
-            disablingCellsWithoutEvents(calendarEvents, { start, ...props }),
-        }}
-        day={{
-          startHour: 0,
-          endHour: 23,
-          step: 60,
-          cellRenderer: ({ start, ...props }: CellRenderedProps) =>
-            disablingCellsWithoutEvents(calendarEvents, { start, ...props }),
-        }}
-        eventRenderer={(event) => {
-          const eventType = String(event.type ?? '').toLowerCase();
-          let displayEndStr = '';
-          if (eventType === 'patrol') {
-            displayEndStr = event.displayEnd
-              ? new Date(event.displayEnd).toLocaleTimeString()
-              : 'TBA';
-          } else if (eventType === 'clean') {
-            displayEndStr = event.usesFallbackEnd
-              ? 'TBA'
-              : event.displayEnd
+          key={`scheduler-${refreshTaskAppCount}`}
+          view="week"
+          month={{
+            weekDays: [0, 1, 2, 3, 4, 5, 6],
+            weekStartOn: 1,
+            startHour: 0,
+            endHour: 23,
+            cellRenderer: ({ start, ...props }: CellRenderedProps) =>
+              disablingCellsWithoutEvents(calendarEvents, { start, ...props }),
+          }}
+          week={{
+            weekDays: [0, 1, 2, 3, 4, 5, 6],
+            weekStartOn: 1,
+            startHour: 0,
+            endHour: 23,
+            step: 60,
+            cellRenderer: ({ start, ...props }: CellRenderedProps) =>
+              disablingCellsWithoutEvents(calendarEvents, { start, ...props }),
+          }}
+          day={{
+            startHour: 0,
+            endHour: 23,
+            step: 60,
+            cellRenderer: ({ start, ...props }: CellRenderedProps) =>
+              disablingCellsWithoutEvents(calendarEvents, { start, ...props }),
+          }}
+          eventRenderer={(event) => {
+            const eventType = String(event.type ?? '').toLowerCase();
+            let displayEndStr = '';
+            if (eventType === 'patrol') {
+              displayEndStr = event.displayEnd
                 ? new Date(event.displayEnd).toLocaleTimeString()
                 : 'TBA';
-          } else {
-            displayEndStr = event.displayEnd
-              ? new Date(event.displayEnd).toLocaleTimeString()
-              : 'TBA';
-          }
+            } else if (eventType === 'clean') {
+              displayEndStr = event.usesFallbackEnd
+                ? 'TBA'
+                : event.displayEnd
+                  ? new Date(event.displayEnd).toLocaleTimeString()
+                  : 'TBA';
+            } else {
+              displayEndStr = event.displayEnd
+                ? new Date(event.displayEnd).toLocaleTimeString()
+                : 'TBA';
+            }
 
-          return (
-            <div
-              style={{
-                backgroundColor: colorMap[eventType] || '#9ca3af',
-                color: 'white',
-                borderRadius: '6px',
-                padding: '2px 6px',
-                fontSize: '12px',
-                overflow: 'hidden',
-                whiteSpace: 'nowrap',
-                height: '100%',
+            return (
+              <div
+                style={{
+                  backgroundColor: colorMap[eventType] || '#9ca3af',
+                  color: 'white',
+                  borderRadius: '6px',
+                  padding: '2px 6px',
+                  fontSize: '12px',
+                  overflow: 'hidden',
+                  whiteSpace: 'nowrap',
+                  height: '100%',
+                }}
+                title={`${event.title} (end: ${displayEndStr})`}
+              >
+                <div>{event.title}</div>
+              </div>
+            );
+          }}
+          // Render a single custom date/time line in the viewer and hide the
+          // scheduler's default header time via DOM-traversal in `ViewerExtra`.
+          viewerExtraComponent={(_, event) => <ViewerExtra event={event} />}
+          draggable={false}
+          editable={true}
+          getRemoteEvents={getRemoteEvents}
+          onEventClick={(event: ProcessedEvent) => {
+            currentEventIdRef.current = Number(event.event_id);
+            exceptDateRef.current = event.start;
+          }}
+          onDelete={async (deletedId: number) => {
+            currentEventIdRef.current = Number(deletedId);
+            setOpenDeleteScheduleDialog(true);
+          }}
+          customEditor={(scheduler) => (
+            <CustomCalendarEditor
+              scheduler={scheduler}
+              value={eventScope}
+              onChange={(event: React.ChangeEvent<HTMLInputElement>) => {
+                setEventScope(event.target.value);
+                AppEvents.refreshTaskApp.next();
               }}
-              title={`${event.title} (end: ${displayEndStr})`}
-            >
-              <div>{event.title}</div>
-              <div style={{ fontSize: 8, marginTop: 2 }}>{`Ends: ${displayEndStr}`}</div>
-            </div>
-          );
-        }}
-        viewerExtraComponent={(_, event) => {
-          const displayEnd = event.displayEnd instanceof Date ? event.displayEnd : null;
-          const rangeText = `${formatScheduleViewerDate(event.start)} - ${displayEnd ? formatScheduleViewerDate(displayEnd) : ''}`;
-          return <div style={{ padding: '0 16px 12px', fontSize: 12 }}>{rangeText}</div>;
-        }}
-        draggable={false}
-        editable={true}
-        getRemoteEvents={getRemoteEvents}
-        onEventClick={(event: ProcessedEvent) => {
-          currentEventIdRef.current = Number(event.event_id);
-          exceptDateRef.current = event.start;
-        }}
-        onDelete={async (deletedId: number) => {
-          currentEventIdRef.current = Number(deletedId);
-          setOpenDeleteScheduleDialog(true);
-        }}
-        customEditor={(scheduler) => (
-          <CustomCalendarEditor
-            scheduler={scheduler}
-            value={eventScope}
-            onChange={(event: React.ChangeEvent<HTMLInputElement>) => {
-              setEventScope(event.target.value);
-              AppEvents.refreshTaskApp.next();
-            }}
-          />
-        )}
-      />
+            />
+          )}
+        />
+      </div>
       {openCreateTaskForm && (
         <CreateTaskForm
           user={username ? username : 'unknown user'}

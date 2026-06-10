@@ -200,6 +200,12 @@ export const scheduleToEvents = (
           }
         }
 
+        // If we have a concrete displayEnd (actual or planned), use it.
+        // For layout the scheduler requires an `end` Date. When there is no
+        // recorded actual end for a clean task we fall back to the default
+        // duration rather than returning `null` (avoids TypeScript type issues
+        // and layout problems). The viewer display will prefer `displayEnd`
+        // (or show 'TBA') so this fallback is only for layout.
         const end = displayEnd ?? addMinutes(cur, DEFAULT_CLEAN_EVENT_DURATION_MINUTES);
 
         events.push({
