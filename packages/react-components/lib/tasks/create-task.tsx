@@ -732,6 +732,67 @@ const getRecurringDaysForDate = (date: Date): RecurringDays => {
 
 const hasSelectedRecurringDay = (days: RecurringDays): boolean => days.some(Boolean);
 
+interface ScheduleValidation {
+  valid: boolean;
+  startOn?: string;
+  at?: string;
+  plannedEndAt?: string;
+  until?: string;
+  days?: string;
+}
+
+const isValidDate = (date?: Date): date is Date => {
+  return date instanceof Date && !isNaN(date.valueOf());
+};
+
+const isTimeAfter = (lhs: Date, rhs: Date): boolean => {
+  const lhsMinutes = lhs.getHours() * 60 + lhs.getMinutes();
+  const rhsMinutes = rhs.getHours() * 60 + rhs.getMinutes();
+  return lhsMinutes > rhsMinutes;
+};
+
+const getScheduleValidation = (schedule: Schedule, cleanTask: boolean): ScheduleValidation => {
+  const validation: ScheduleValidation = { valid: true };
+
+  if (!isValidDate(schedule.startOn)) {
+    validation.startOn = 'Enter a valid start date.';
+  }
+
+  if (!isValidDate(schedule.at)) {
+    validation.at = 'Enter a valid start time.';
+  }
+
+  if (schedule.recurring && !hasSelectedRecurringDay(schedule.days)) {
+    validation.days = 'Select at least one repeat day.';
+  }
+
+  if (schedule.recurring && schedule.until !== undefined) {
+    if (!isValidDate(schedule.until)) {
+      validation.until = 'Enter a valid end date.';
+    } else if (isValidDate(schedule.startOn) && schedule.until < schedule.startOn) {
+      validation.until = 'End date must be on or after the start date.';
+    }
+  }
+
+  if (!cleanTask && schedule.plannedEndAt !== undefined) {
+    if (!isValidDate(schedule.plannedEndAt)) {
+      validation.plannedEndAt = 'Enter a valid planned end time.';
+    } else if (isValidDate(schedule.at) && !isTimeAfter(schedule.plannedEndAt, schedule.at)) {
+      validation.plannedEndAt = 'Planned end must be after the start time.';
+    }
+  }
+
+  validation.valid = !(
+    validation.startOn ||
+    validation.at ||
+    validation.plannedEndAt ||
+    validation.until ||
+    validation.days
+  );
+
+  return validation;
+};
+
 const makeDefaultSchedule = (): Schedule => {
   const startOn = new Date();
 
@@ -1098,6 +1159,10 @@ export function CreateTaskForm({
   };
 
   const submitText = taskRequests.length > 1 ? 'Submit All Now' : 'Submit Now';
+  const scheduleValidation = React.useMemo(
+    () => getScheduleValidation(schedule, isCleanTask),
+    [isCleanTask, schedule],
+  );
 
   return (
     <>
@@ -1388,8 +1453,13 @@ export function CreateTaskForm({
           open={openSchedulingDialog}
           title="Schedule Task"
           submitting={false}
+          confirmDisabled={!scheduleValidation.valid}
           onClose={() => setOpenSchedulingDialog(false)}
           onSubmit={(ev: React.FormEvent) => {
+            if (!scheduleValidation.valid) {
+              return;
+            }
+
             handleSubmitSchedule(ev);
 
             setOpenSchedulingDialog(false);
@@ -1420,7 +1490,14 @@ export function CreateTaskForm({
                 }
                 label="Start On"
                 disabled={!scheduleEnabled}
-                renderInput={(props) => <TextField {...props} fullWidth />}
+                renderInput={(props) => (
+                  <TextField
+                    {...props}
+                    fullWidth
+                    error={props.error || !!scheduleValidation.startOn}
+                    helperText={scheduleValidation.startOn ?? props.helperText}
+                  />
+                )}
               />
             </Grid>
 
@@ -1449,7 +1526,14 @@ export function CreateTaskForm({
                 }}
                 label="At"
                 disabled={!scheduleEnabled}
-                renderInput={(props) => <TextField {...props} fullWidth />}
+                renderInput={(props) => (
+                  <TextField
+                    {...props}
+                    fullWidth
+                    error={props.error || !!scheduleValidation.at}
+                    helperText={scheduleValidation.at ?? props.helperText}
+                  />
+                )}
               />
             </Grid>
             {!isCleanTask && (
@@ -1466,7 +1550,14 @@ export function CreateTaskForm({
                   }}
                   label="Planned end"
                   disabled={!scheduleEnabled}
-                  renderInput={(props) => <TextField {...props} fullWidth />}
+                  renderInput={(props) => (
+                    <TextField
+                      {...props}
+                      fullWidth
+                      error={props.error || !!scheduleValidation.plannedEndAt}
+                      helperText={scheduleValidation.plannedEndAt ?? props.helperText}
+                    />
+                  )}
                 />
               </Grid>
             )}
@@ -1531,6 +1622,10 @@ export function CreateTaskForm({
                   disabled={!scheduleEnabled}
                   onChange={(days) => setSchedule((prev) => ({ ...prev, days }))}
                 />
+
+                {scheduleValidation.days && (
+                  <FormHelperText error>{scheduleValidation.days}</FormHelperText>
+                )}
               </Grid>
             )}
           </Grid>
@@ -1580,7 +1675,14 @@ export function CreateTaskForm({
                       !schedule.recurring ||
                       scheduleUntilValue !== ScheduleUntilValue.ON
                     }
-                    renderInput={(props) => <TextField {...props} fullWidth />}
+                    renderInput={(props) => (
+                      <TextField
+                        {...props}
+                        fullWidth
+                        error={props.error || !!scheduleValidation.until}
+                        helperText={scheduleValidation.until ?? props.helperText}
+                      />
+                    )}
                   />
                 </Grid>
               </RadioGroup>

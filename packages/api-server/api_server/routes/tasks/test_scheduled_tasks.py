@@ -624,7 +624,7 @@ class TestScheduledTasksRoute(AppFixture):
         self.assertFalse(dispatched)
         self.assertEqual(0, len(captured_requests))
 
-    def test_try_dispatch_chained_schedule_run_allows_clean_category(self):
+    def test_try_dispatch_chained_schedule_run_never_chains_clean_category(self):
         portal = self.get_portal()
 
         async def create_schedule() -> int:
@@ -687,13 +687,76 @@ class TestScheduledTasksRoute(AppFixture):
 
             dispatched = portal.call(run_chain)
 
-        self.assertTrue(dispatched)
-        self.assertEqual(1, len(captured_requests))
-        request_payload = captured_requests[0].request
-        self.assertEqual("clean", request_payload.category)
-        self.assertIn(
-            "scheduled_schedule_id=" + str(schedule_id), request_payload.labels
-        )
+        self.assertFalse(dispatched)
+        self.assertEqual(0, len(captured_requests))
+
+    def test_try_dispatch_chained_schedule_run_never_chains_normalized_clean_category(
+        self,
+    ):
+        portal = self.get_portal()
+
+        async def create_schedule() -> int:
+            task = await ttm.ScheduledTask.create(
+                task_request={
+                    "category": " Clean ",
+                    "description": {
+                        "zone": "zone_a",
+                    },
+                },
+                created_by="test",
+            )
+            schedule = await ttm.ScheduledTaskSchedule.create(
+                scheduled_task=task,
+                period=ttm.ScheduledTaskSchedule.Period.Day,
+                start_from=datetime.now(timezone.utc),
+                dispatched=True,
+            )
+            return schedule.get_id()
+
+        schedule_id = portal.call(create_schedule)
+        captured_requests = []
+
+        fake_repo = MagicMock()
+
+        async def fake_query_task_states(**kwargs):
+            _ = kwargs
+            return []
+
+        fake_repo.query_task_states = AsyncMock(side_effect=fake_query_task_states)
+
+        async def fake_post_dispatch_task(dispatch_request, _task_repo):
+            captured_requests.append(dispatch_request)
+
+        with patch.object(
+            scheduled_tasks_module,
+            "post_dispatch_task",
+            side_effect=fake_post_dispatch_task,
+        ), patch.object(
+            scheduled_tasks_module,
+            "should_skip_due_to_planned_end",
+            return_value=False,
+        ), patch.object(
+            scheduled_tasks_module,
+            "_occurrence_allowed",
+            return_value=True,
+        ):
+
+            async def run_chain() -> bool:
+                schedule_row = await ttm.ScheduledTaskSchedule.get_or_none(
+                    _id=schedule_id
+                ).select_related("scheduled_task")
+                assert schedule_row is not None
+                return await scheduled_tasks_module.try_dispatch_chained_schedule_run(
+                    schedule_row,
+                    fake_repo,
+                    completed_task_id="completed_clean_2",
+                    allowed_categories={"patrol", "clean", "loop", "compose"},
+                )
+
+            dispatched = portal.call(run_chain)
+
+        self.assertFalse(dispatched)
+        self.assertEqual(0, len(captured_requests))
 
     def test_cancel_active_scheduled_task_if_overdue_cancels_live_task(self):
         portal = self.get_portal()

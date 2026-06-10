@@ -2,6 +2,7 @@ import { ProcessedEvent } from '@aldabil/react-scheduler/types';
 import { ScheduledTask, ScheduledTaskSchedule as ApiSchedule } from 'api-client';
 import {
   addMinutes,
+  addDays,
   endOfDay,
   isFriday,
   isMonday,
@@ -20,10 +21,23 @@ import {
 } from 'date-fns';
 import { getShortDescription, RecurringDays, Schedule } from 'react-components';
 
+export const DEFAULT_CLEAN_EVENT_DURATION_MINUTES = 45;
+
 const getPlannedEnd = (startTime: Date, plannedEndAt: string): Date => {
   const [hours, minutes] = plannedEndAt.split(':').map((value: string) => Number(value));
   const plannedEnd = new Date(startTime);
-  plannedEnd.setHours(hours, minutes, 0, 0);
+  // Interpret `plannedEndAt` as a local wall-clock time (the user's timezone when schedule was created).
+  // Compute the offset between the `startTime` local hour and its UTC hour, then convert the
+  // intended local hours to UTC hours so the resulting Date represents the correct instant.
+  const localHour = plannedEnd.getHours();
+  const utcHour = plannedEnd.getUTCHours();
+  const offset = localHour - utcHour; // e.g., +8 for UTC+8
+  let targetUtcHour = hours - offset;
+  // Normalize to 0-23 range
+  while (targetUtcHour < 0) targetUtcHour += 24;
+  while (targetUtcHour >= 24) targetUtcHour -= 24;
+  // Set as UTC hours so the Date's instant aligns with the original local wall-clock
+  plannedEnd.setUTCHours(targetUtcHour, minutes, 0, 0);
   return plannedEnd;
 };
 
@@ -113,14 +127,89 @@ export const scheduleToEvents = (
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const schedId = (schedule as any)?.id;
         const title = schedId != null ? `[S:${schedId}] ${baseTitle}` : baseTitle;
-        const end = schedule.planned_end_at
-          ? getPlannedEnd(cur, schedule.planned_end_at)
-          : addMinutes(cur, 45);
+        let displayEnd: Date | null = null;
+        let usesFallbackEnd = false;
+
+        if (taskType === 'patrol' && schedule.planned_end_at) {
+          displayEnd = getPlannedEnd(cur, schedule.planned_end_at);
+          // If the planned end is before or equal to the start, roll it forward
+          // to the next day until it is after start.
+          while (displayEnd <= cur) {
+            displayEnd = addDays(displayEnd, 1);
+          }
+          usesFallbackEnd = false;
+        } else if (taskType === 'clean') {
+          // For cleaning tasks, use actual_end_time from schedule if available or null
+          // This should be the true end time after task completion
+          // Here assumed actual_end_time field; fallback is null
+          const actualEndIso = (schedule as any).actual_end_iso || null;
+          const actualEndTimeStr = (schedule as any).actual_end_time || null;
+          // Only apply a recorded actual end time to the specific occurrence that finished.
+          // The backend writes `actual_end_iso` for the run that just completed; if present,
+          // use it only when its date matches the current occurrence date `cur`.
+          if (actualEndIso) {
+            const actualIsoDate = new Date(actualEndIso).toISOString().slice(0, 10);
+            if (actualIsoDate === curFormatted) {
+              displayEnd = new Date(actualEndIso);
+              usesFallbackEnd = false;
+            } else {
+              // Ignore actual end for other occurrences
+              displayEnd = null;
+              usesFallbackEnd = true;
+            }
+          } else if (actualEndTimeStr) {
+            // Fallback when ISO is not available: conservatively only apply the
+            // actual end time when the schedule's `start_from` is the same date
+            // as this occurrence. This avoids leaking a previous run's end time
+            // into future occurrences.
+            const schedStartDate = schedule.start_from
+              ? new Date(schedule.start_from).toISOString().slice(0, 10)
+              : null;
+            if (schedStartDate === curFormatted) {
+              displayEnd = getPlannedEnd(cur, actualEndTimeStr);
+              // Debug: log actual end time values to help troubleshoot display issues
+              // eslint-disable-next-line no-console
+              console.debug('scheduleToEvents: clean schedule actual_end_time (applied)', {
+                scheduleId: (schedule as any)?.id,
+                actualEndTimeStr,
+                cur: cur.toISOString(),
+                displayEnd: displayEnd?.toISOString(),
+              });
+              while (displayEnd <= cur) {
+                displayEnd = addDays(displayEnd, 1);
+              }
+              usesFallbackEnd = false;
+            } else {
+              displayEnd = null;
+              usesFallbackEnd = true;
+            }
+          } else {
+            displayEnd = null;
+            usesFallbackEnd = true;
+          }
+        } else {
+          // For other task types fallback to planned_end_at if exists
+          displayEnd = schedule.planned_end_at ? getPlannedEnd(cur, schedule.planned_end_at) : null;
+          if (displayEnd) {
+            while (displayEnd <= cur) {
+              displayEnd = addDays(displayEnd, 1);
+            }
+            usesFallbackEnd = false;
+          } else {
+            usesFallbackEnd = false;
+          }
+        }
+
+        const end = displayEnd ?? addMinutes(cur, DEFAULT_CLEAN_EVENT_DURATION_MINUTES);
+
         events.push({
           start: cur,
           end,
           event_id: getEventId(),
           title,
+          type: taskType,
+          displayEnd,
+          usesFallbackEnd,
         });
       }
     }

@@ -26,6 +26,7 @@ import useGetUsername from '../../hooks/useFetchUser';
 import { AppControllerContext } from '../app-contexts';
 import { AppEvents } from '../app-events';
 import { RmfAppContext } from '../rmf-app';
+import { getScheduleSubmitErrorMessage } from '../utils';
 import { parseTasksFile, toApiSchedule } from './utils';
 import {
   apiScheduleToSchedule,
@@ -64,6 +65,15 @@ const disablingCellsWithoutEvents = (
     />
   );
 };
+
+const formatScheduleViewerDate = (date: Date): string =>
+  date.toLocaleString(undefined, {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 
 export const TaskSchedule = () => {
   const rmf = React.useContext(RmfAppContext);
@@ -138,12 +148,15 @@ export const TaskSchedule = () => {
           params.start.toISOString(),
         )
       ).data;
+      // Debug: log raw tasks returned from API for easier inspection in browser console
+      // eslint-disable-next-line no-console
+      console.debug('getRemoteEvents: scheduled_tasks response', tasks);
       let counter = 0;
       const getEventId = () => {
         return counter++;
       };
       eventsMap.current = {};
-      return tasks.flatMap((t: ScheduledTask) =>
+      const allEvents = tasks.flatMap((t: ScheduledTask) =>
         t.schedules.flatMap<ProcessedEvent>((s: ApiSchedule) => {
           const events = scheduleToEvents(params.start, params.end, s, t, getEventId, () =>
             getScheduledTaskTitle(t),
@@ -151,10 +164,11 @@ export const TaskSchedule = () => {
           events.forEach((ev) => {
             eventsMap.current[Number(ev.event_id)] = t;
           });
-          setCalendarEvents(events);
           return events;
         }),
       );
+      setCalendarEvents(allEvents);
+      return allEvents;
     },
     [rmf],
   );
@@ -260,7 +274,22 @@ export const TaskSchedule = () => {
       console.error(e);
     } finally {
       setRunsLoading(false);
+      // Refresh the calendar events to reflect updated end times
+      if (rmf) {
+        refreshSchedulerEvents();
+      }
     }
+  };
+
+  const refreshSchedulerEvents = () => {
+    if (!rmf) return;
+    // We can call getRemoteEvents with a reasonable time range to refresh
+    setCalendarEvents([]);
+    getRemoteEvents({
+      view: 'week',
+      start: new Date(Date.now() - 86400000 * 7), // 7 days ago
+      end: new Date(Date.now() + 86400000 * 30), // 30 days ahead
+    });
   };
 
   const submitTasks = React.useCallback<Required<CreateTaskFormProps>['submitTasks']>(
@@ -481,6 +510,23 @@ export const TaskSchedule = () => {
         }}
         eventRenderer={(event) => {
           const eventType = String(event.type ?? '').toLowerCase();
+          let displayEndStr = '';
+          if (eventType === 'patrol') {
+            displayEndStr = event.displayEnd
+              ? new Date(event.displayEnd).toLocaleTimeString()
+              : 'TBA';
+          } else if (eventType === 'clean') {
+            displayEndStr = event.usesFallbackEnd
+              ? 'TBA'
+              : event.displayEnd
+                ? new Date(event.displayEnd).toLocaleTimeString()
+                : 'TBA';
+          } else {
+            displayEndStr = event.displayEnd
+              ? new Date(event.displayEnd).toLocaleTimeString()
+              : 'TBA';
+          }
+
           return (
             <div
               style={{
@@ -493,10 +539,17 @@ export const TaskSchedule = () => {
                 whiteSpace: 'nowrap',
                 height: '100%',
               }}
+              title={`${event.title} (end: ${displayEndStr})`}
             >
-              {event.title} ({eventType || 'unknown'})
+              <div>{event.title}</div>
+              <div style={{ fontSize: 8, marginTop: 2 }}>{`Ends: ${displayEndStr}`}</div>
             </div>
           );
+        }}
+        viewerExtraComponent={(_, event) => {
+          const displayEnd = event.displayEnd instanceof Date ? event.displayEnd : null;
+          const rangeText = `${formatScheduleViewerDate(event.start)} - ${displayEnd ? formatScheduleViewerDate(displayEnd) : ''}`;
+          return <div style={{ padding: '0 16px 12px', fontSize: 12 }}>{rangeText}</div>;
         }}
         draggable={false}
         editable={true}
@@ -565,7 +618,7 @@ export const TaskSchedule = () => {
             showAlert('success', 'Successfully created schedule');
           }}
           onFailScheduling={(e) => {
-            showAlert('error', `Failed to submit schedule: ${e.message}`);
+            showAlert('error', getScheduleSubmitErrorMessage(e));
           }}
         />
       )}
