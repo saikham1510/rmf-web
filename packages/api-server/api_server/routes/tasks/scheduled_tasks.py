@@ -237,13 +237,13 @@ async def update_completed_clean_schedule_end(
         actual_time_str = finish_dt.strftime("%H:%M")
         logger.exception("failed to align actual_end_time, falling back to local time")
 
-    schedule_row.planned_end_at = actual_time_str
-    # Also update actual_end_time and actual_end_iso for clean tasks to support frontend display
+    # Do NOT overwrite the schedule's `planned_end_at` for recurring schedules.
+    # `planned_end_at` represents the daily planned cutoff and should remain
+    # stable across occurrences. Overwriting it with a single run's actual
+    # finish time can prevent future occurrences from being scheduled.
     schedule_row.actual_end_time = actual_time_str
     schedule_row.actual_end_iso = finish_dt_utc.replace(tzinfo=timezone.utc).isoformat()
-    await schedule_row.save(
-        update_fields=["planned_end_at", "actual_end_time", "actual_end_iso"]
-    )
+    await schedule_row.save(update_fields=["actual_end_time", "actual_end_iso"])
     logger.info(
         "saved actual_end_time=%s for schedule_id=%s",
         actual_time_str,
@@ -691,7 +691,18 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
         # Otherwise, update next_run_at and clear dispatched so scheduler can pick it up later
         schedule_row.next_run_at = next_run
         schedule_row.dispatched = False
-        await schedule_row.save(update_fields=["next_run_at", "dispatched"])
+        # Clear any per-occurrence actual end markers so future occurrences are
+        # not influenced by the previous run's finish time when rendering.
+        schedule_row.actual_end_time = None
+        schedule_row.actual_end_iso = None
+        await schedule_row.save(
+            update_fields=[
+                "next_run_at",
+                "dispatched",
+                "actual_end_time",
+                "actual_end_iso",
+            ]
+        )
         logger.info(
             "schedule_id=%s next_run updated to %s",
             schedule_id,

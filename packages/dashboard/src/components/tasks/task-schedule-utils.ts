@@ -143,25 +143,45 @@ export const scheduleToEvents = (
           // Here assumed actual_end_time field; fallback is null
           const actualEndIso = (schedule as any).actual_end_iso || null;
           const actualEndTimeStr = (schedule as any).actual_end_time || null;
+          // Only apply a recorded actual end time to the specific occurrence that finished.
+          // The backend writes `actual_end_iso` for the run that just completed; if present,
+          // use it only when its date matches the current occurrence date `cur`.
           if (actualEndIso) {
-            // Use the unambiguous ISO timestamp (UTC) if backend provided it
-            displayEnd = new Date(actualEndIso);
-          } else if (actualEndTimeStr) {
-            displayEnd = getPlannedEnd(cur, actualEndTimeStr);
-            // Debug: log actual end time values to help troubleshoot display issues
-            // eslint-disable-next-line no-console
-            console.debug('scheduleToEvents: clean schedule actual_end_time', {
-              scheduleId: (schedule as any)?.id,
-              actualEndTimeStr,
-              cur: cur.toISOString(),
-              displayEnd: displayEnd?.toISOString(),
-            });
-            // If the actual end computes to a time before the start, roll it forward
-            // to the next day until it is after the start.
-            while (displayEnd <= cur) {
-              displayEnd = addDays(displayEnd, 1);
+            const actualIsoDate = new Date(actualEndIso).toISOString().slice(0, 10);
+            if (actualIsoDate === curFormatted) {
+              displayEnd = new Date(actualEndIso);
+              usesFallbackEnd = false;
+            } else {
+              // Ignore actual end for other occurrences
+              displayEnd = null;
+              usesFallbackEnd = true;
             }
-            usesFallbackEnd = false;
+          } else if (actualEndTimeStr) {
+            // Fallback when ISO is not available: conservatively only apply the
+            // actual end time when the schedule's `start_from` is the same date
+            // as this occurrence. This avoids leaking a previous run's end time
+            // into future occurrences.
+            const schedStartDate = schedule.start_from
+              ? new Date(schedule.start_from).toISOString().slice(0, 10)
+              : null;
+            if (schedStartDate === curFormatted) {
+              displayEnd = getPlannedEnd(cur, actualEndTimeStr);
+              // Debug: log actual end time values to help troubleshoot display issues
+              // eslint-disable-next-line no-console
+              console.debug('scheduleToEvents: clean schedule actual_end_time (applied)', {
+                scheduleId: (schedule as any)?.id,
+                actualEndTimeStr,
+                cur: cur.toISOString(),
+                displayEnd: displayEnd?.toISOString(),
+              });
+              while (displayEnd <= cur) {
+                displayEnd = addDays(displayEnd, 1);
+              }
+              usesFallbackEnd = false;
+            } else {
+              displayEnd = null;
+              usesFallbackEnd = true;
+            }
           } else {
             displayEnd = null;
             usesFallbackEnd = true;
