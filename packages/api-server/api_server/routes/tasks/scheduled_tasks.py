@@ -581,9 +581,9 @@ async def _dispatch_return_to_charger(robot_name: str):
         "robot": robot_name,
         "fleet": "TinyRobot",
         "request": {
-            "category": "go_to_place",
-            "description": {"place_name": charger_place},
-            "unix_millis_earliest_start_time": now_wall_millis(),
+            "category": "patrol",
+            "description": {"places": [charger_place], "rounds": 1},
+            "unix_millis_earliest_start_time": 0,
             "unix_millis_request_time": now_wall_millis(),
             "labels": ["auto_return_to_charger"],
         },
