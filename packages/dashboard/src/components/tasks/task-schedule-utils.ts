@@ -54,6 +54,7 @@ const getPlannedEnd = (startTime: Date, plannedEndAt: string): Date => {
  * @param getEventTitle Callback function to get the event title.
  * @returns List of ProcessedEvents to occur within the query start and end.
  */
+
 export const scheduleToEvents = (
   start: Date,
   end: Date,

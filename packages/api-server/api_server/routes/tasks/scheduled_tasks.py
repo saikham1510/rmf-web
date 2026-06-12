@@ -10,6 +10,7 @@ from typing import Optional
 
 import schedule
 import tortoise.transactions
+from cairo import Status
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel
 from tortoise.expressions import Q
@@ -589,6 +590,143 @@ async def _cancel_overdue_schedule_tasks(
         )
 
 
+async def _trigger_post_task_recovery(task_state, schedule_row, task_repo, now_utc):
+
+    task_id = task_state.booking.id
+    schedule_id = schedule_row.get_id()
+    logger.info("RECOVERY_TRIGGERED task_id=%s schedule_id=%s", task_id, schedule_id)
+
+    await asyncio.sleep(2.0)
+
+    # 1. Fetch all tasks for this schedule
+    label = Labels.from_strings([f"scheduled_schedule_id={schedule_id}"])
+    states = await task_repo.query_task_states(label=label)
+
+    # 2. Determine what is done vs not done (you already have phases/events)
+    completed = []
+    skipped = []
+
+    terminal_ok_statuses = {TaskStatus.completed}
+    terminal_bad_statuses = {
+        TaskStatus.canceled,
+        TaskStatus.failed,
+        TaskStatus.skipped,
+    }
+
+    for s in states:
+        logger.error(
+            "RECOVERY_STATE task=%s status=%s finish=%s assigned=%s",
+            s.booking.id,
+            s.status,
+            s.unix_millis_finish_time,
+            getattr(s.assigned_to, "name", None),
+        )
+    for s in states:
+        sid = s.booking.id
+        if s.status in terminal_ok_statuses:
+            # Finished successfully before the window closed.
+            completed.append(sid)
+        elif s.status in terminal_bad_statuses or s.unix_millis_finish_time is None:
+            # Either already terminal-bad, or still has no finish time which
+            # means it was mid-execution when time ran out → skipped/cancelled.
+            skipped.append(sid)
+        else:
+            # Has a finish time but unknown status — treat as completed.
+            completed.append(sid)
+
+    logger.error(
+        "RECOVERY schedule_id=%s completed=%s skipped=%s",
+        schedule_id,
+        completed,
+        skipped,
+    )
+    robot_name = getattr(task_state.assigned_to, "name", None)
+
+    logger.error(
+        "RECOVERY initial robot_name=%s task_id=%s",
+        robot_name,
+        task_id,
+    )
+
+    if not robot_name:
+        # Re-query by task id label to get a fresher copy.
+        try:
+            fresh_states = await task_repo.query_task_states(
+                label=Labels.from_strings([f"scheduled_schedule_id={schedule_id}"])
+            )
+            for fs in fresh_states:
+                candidate = getattr(fs.assigned_to, "name", None)
+                if candidate:
+                    robot_name = candidate
+                    break
+        except Exception:
+            logger.exception(
+                "RECOVERY failed to re-fetch task state for robot name task_id=%s",
+                task_id,
+            )
+
+    if robot_name:
+        logger.error(
+            "RECOVERY dispatching return-to-charger robot=%s schedule_id=%s",
+            robot_name,
+            schedule_id,
+        )
+        await _dispatch_return_to_charger(robot_name)
+    else:
+        logger.warning(
+            "RECOVERY could not resolve robot name for task_id=%s; "
+            "charger dispatch skipped",
+            task_id,
+        )
+
+
+async def _dispatch_return_to_charger(robot_name: str):
+
+    CHARGER_MAP = {
+        "TinyRobot1": "tinyRobot1_charger",
+    }
+    charger_place = CHARGER_MAP.get(robot_name)
+
+    logger.info("RETURN_TO_CHARGER robot=%s", robot_name)
+
+    request_payload = {
+        "type": "robot_task_request",
+        "robot": robot_name,
+        "fleet": "TinyRobot",
+        "request": {
+            "category": "patrol",
+            "description": {"places": [charger_place], "rounds": 1},
+            "unix_millis_earliest_start_time": 0,
+            "unix_millis_request_time": now_wall_millis(),
+            "labels": ["auto_return_to_charger"],
+        },
+    }
+
+    try:
+        logger.error(
+            "RETURN_TO_CHARGER PAYLOAD=%s",
+            json.dumps(request_payload, indent=2),
+        )
+
+        result = await tasks_service().call(json.dumps(request_payload))
+
+        logger.error(
+            "RETURN_TO_CHARGER RESULT=%s",
+            result,
+        )
+
+        logger.info(
+            "RETURN_TO_CHARGER dispatched successfully robot=%s",
+            robot_name,
+        )
+
+    except Exception:
+        logger.exception("RETURN_TO_CHARGER dispatch failed robot=%s", robot_name)
+
+
+_recovery_dispatched: set[str] = set()
+
+
 async def cancel_active_scheduled_task_if_overdue(
     schedule_row: ttm.ScheduledTaskSchedule,
     task_state,
@@ -596,6 +734,7 @@ async def cancel_active_scheduled_task_if_overdue(
     now_utc: datetime,
 ) -> bool:
     """Cancel a live scheduled task if the schedule window has already closed."""
+
     if schedule_row.scheduled_task is None:
         return False
 
@@ -618,6 +757,19 @@ async def cancel_active_scheduled_task_if_overdue(
             "scheduled_end_time_auto_cancel",
         ],
     )
+    logger.info(
+        "CANCEL_CHECK_ENTER schedule_id=%s task_id=%s status=%s now=%s planned_end=%s",
+        schedule_row.get_id(),
+        task_state.booking.id,
+        task_state.status,
+        now_utc,
+        schedule_row.planned_end_at,
+    )
+    task_id = task_state.booking.id
+    if task_id in _recovery_dispatched:
+        logger.info("CANCEL_SKIP recovery already dispatched task_id=%s", task_id)
+        return False
+
     try:
         logger.info(
             "canceling active scheduled task schedule_id=%s task_id=%s status=%s",
@@ -626,12 +778,23 @@ async def cancel_active_scheduled_task_if_overdue(
             task_state.status,
         )
         await tasks_service().call(cancel_request.model_dump_json(exclude_none=True))
+        logger.error(
+            " CANCEL SUCCESS task_id=%s",
+            task_id,
+        )
+        _recovery_dispatched.add(task_id)
+
+        asyncio.create_task(
+            _trigger_post_task_recovery(task_state, schedule_row, task_repo, now_utc)
+        )
+
         return True
+
     except Exception:
         logger.exception(
             "failed to cancel scheduled task schedule_id=%s task_id=%s",
             schedule_id,
-            task_state.booking.id,
+            task_id,
         )
         return False
 
