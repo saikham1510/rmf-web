@@ -1,4 +1,4 @@
-from datetime import timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -103,14 +103,15 @@ class ScheduledTaskSchedule(Model):
             # The `at` field contains local time (HH:MM format from user's browser).
             job = job.at(self.at)
 
-        # schedule library requires naive datetime for `.until()`; normalize
-        # `until` to UTC and pass a naive UTC-localized datetime.
+        # schedule library requires naive datetime for `.until()` and compares it
+        # against datetime.now() (local naive time), so convert to local — not UTC.
         if self.until is not None:
             u = self.until
             if u.tzinfo is None:
                 u = u.replace(tzinfo=timezone.utc)
-            u_utc = u.astimezone(timezone.utc)
-            job = job.until(u_utc.replace(tzinfo=None))
+            local_tz = datetime.now().astimezone().tzinfo
+            u_local = u.astimezone(local_tz)
+            job = job.until(u_local.replace(tzinfo=None))
 
         # Hashable value in order to tag the job with a unique identifier
         job.tag(self._id)
