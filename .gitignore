@@ -9,3 +9,4 @@ __pycache__/
 # build / runtime artifacts
 packages/api-server/install/
 packages/api-server/log/
+log/
