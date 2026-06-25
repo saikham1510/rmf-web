@@ -613,7 +613,7 @@ export const AppBar = React.memo(({ extraToolbarItems }: AppBarProps): React.Rea
     (async () => {
       const { data: alerts } = await rmf.alertsApi.getAlertsAlertsGet();
       const unackList = alerts.filter(
-        (alert) =>
+        (alert: any) =>
           String(alert.category).toLowerCase() !== 'robot' &&
           !alert.acknowledged_by &&
           !alert.unix_millis_acknowledged_time,
