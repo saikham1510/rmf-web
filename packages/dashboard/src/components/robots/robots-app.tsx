@@ -53,7 +53,7 @@ export const RobotsApp = createMicroApp('Robots', () => {
         const tasks =
           taskIds.length > 0
             ? (await rmf.tasksApi.queryTaskStatesTasksGet(taskIds.join(','))).data.reduce(
-                (acc, task) => {
+                (acc: any, task: any) => {
                   acc[task.booking.id] = task;
                   return acc;
                 },
