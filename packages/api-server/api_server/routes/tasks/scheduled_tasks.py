@@ -273,6 +273,17 @@ async def _dispatch_schedule_task_request(
         )
         return
 
+    # DIAGNOSTIC (ERROR-level so it survives ERROR-only log capture):
+    # attribute every loop dispatch to its source. chain_parent set => chaining;
+    # None => scheduler-driven occurrence start.
+    logger.info(
+        "loop dispatch schedule_id=%s source=%s chain_parent=%s ended_latch=%s",
+        schedule_row.get_id(),
+        "chain" if chain_parent_task_id is not None else "scheduler",
+        chain_parent_task_id,
+        schedule_row.get_id() in _ended_schedules,
+    )
+
     task_request = _build_request_for_schedule_dispatch(
         schedule_row,
         chain_parent_task_id=chain_parent_task_id,
@@ -321,6 +332,17 @@ async def try_dispatch_chained_schedule_run(
     if parent_task is None:
         logger.warning(
             "chain: schedule_id=%s has no parent task",
+            schedule_row.get_id(),
+        )
+        return False
+
+    # If end-time recovery already fired for this schedule's current occurrence,
+    # the window is closed: do not chain another loop. This is authoritative and
+    # independent of the planned_end_at clock check, so a late-completing loop
+    # cannot send the robot back out after it has been recalled to the charger.
+    if schedule_row.get_id() in _ended_schedules:
+        logger.info(
+            "chain: schedule_id=%s skip because end-time recovery already fired",
             schedule_row.get_id(),
         )
         return False
@@ -726,6 +748,14 @@ async def _dispatch_return_to_charger(robot_name: str):
 
 _recovery_dispatched: set[str] = set()
 
+# Schedules whose end-time recovery (cancel + return-to-charger) has already
+# fired for the current occurrence. Once a schedule is here, no further loops
+# may be chained for it — the robot must completely forget the incomplete task
+# until a genuinely new occurrence starts. Re-enabled in
+# `_dispatch_scheduled_schedule`, which only runs at the start of a fresh
+# scheduler-driven occurrence.
+_ended_schedules: set[int] = set()
+
 
 async def cancel_active_scheduled_task_if_overdue(
     schedule_row: ttm.ScheduledTaskSchedule,
@@ -783,6 +813,14 @@ async def cancel_active_scheduled_task_if_overdue(
             task_id,
         )
         _recovery_dispatched.add(task_id)
+        # Close this schedule's occurrence so no further loops can be chained.
+        # The robot is being recalled to the charger; the incomplete loop must
+        # be forgotten, not resumed.
+        _ended_schedules.add(schedule_id)
+        logger.info(
+            "marked schedule_id=%s as ended; chaining disabled until next occurrence",
+            schedule_id,
+        )
 
         asyncio.create_task(
             _trigger_post_task_recovery(task_state, schedule_row, task_repo, now_utc)
@@ -836,6 +874,10 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
         await ttm.ScheduledTaskSchedule.filter(_id=schedule_id).update(dispatched=False)
         return
 
+    # A fresh scheduler-driven occurrence is starting: re-enable chaining for
+    # this schedule in case a previous occurrence was ended by end-time recovery.
+    _ended_schedules.discard(schedule_id)
+
     await _dispatch_schedule_task_request(
         schedule_row,
         TaskRepository(INTERNAL_USER),
@@ -867,7 +909,7 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
             ]
         )
         logger.info(
-            "schedule_id=%s next_run updated to %s",
+            "schedule_id=%s next_run updated to %s (will fire again)",
             schedule_id,
             next_run.isoformat(),
         )
