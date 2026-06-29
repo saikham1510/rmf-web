@@ -5,6 +5,9 @@ import time
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple, cast
 
+from fastapi import Body, Depends, HTTPException, Path, Query
+from reactivex import operators as rxops
+
 from api_server import models as mdl
 from api_server.dependencies import (
     between_query,
@@ -25,8 +28,6 @@ from api_server.response import RawJSONResponse
 from api_server.rmf_io import task_events, tasks_service
 from api_server.ros import ros_node
 from api_server.utils.time_utils import real_to_sim
-from fastapi import Body, Depends, HTTPException, Path, Query
-from reactivex import operators as rxops
 
 router = FastIORouter(tags=["Tasks"])
 
@@ -519,6 +520,11 @@ async def _handle_critical_preemption(
         preferred_active_statuses = {"underway", "blocked", "delayed", "standby"}
         paused_task: Optional[mdl.TaskState] = None
         critical_task_id = task_id
+        # When we immediately preempt, the paused task is *killed* (not merely
+        # paused). A killed task must never be resumed afterwards, otherwise the
+        # robot drives back to finish work it was meant to abandon (e.g. resuming
+        # a patrol after an end-of-shift return-to-charger preemption).
+        paused_task_killed = False
 
         if interrupt_immediately:
             candidates = await task_repo.query_task_states()
@@ -740,6 +746,7 @@ async def _handle_critical_preemption(
                             kill_req.model_dump_json(exclude_none=True),
                             timeout=5,
                         )
+                        paused_task_killed = True
                         logger.info(
                             "critical watcher: killed %s for critical %s",
                             paused_id,
@@ -944,25 +951,43 @@ async def _handle_critical_preemption(
         finally:
             sub2.dispose()
 
-        # attempt resume if we saved a token
-        try:
-            token = await task_repo.get_interruption_token(paused_id)
-            if token:
-                resume_req = mdl.TaskResumeRequest(
-                    type="resume_task_request",
-                    task_id=paused_id,
-                    token=token,
-                    labels=[f"resumed_after={task_id}"],
-                )
-                await tasks_service().call(
-                    resume_req.model_dump_json(exclude_none=True)
-                )
-                await task_repo.delete_interruption_token(paused_id)
-                logger.info("critical watcher: resumed %s after %s", paused_id, task_id)
-        except Exception:
-            logger.exception(
-                "critical watcher: failed to resume %s after %s", paused_id, task_id
+        # attempt resume if we saved a token — but never resume a task we killed.
+        # Immediate preemption (e.g. end-of-shift return-to-charger) kills the
+        # paused task; resuming it would send the robot back to abandon work.
+        if paused_task_killed:
+            logger.info(
+                "critical watcher: not resuming %s — it was killed for critical %s",
+                paused_id,
+                task_id,
             )
+            # Clean up any stale interruption token so it cannot be reused later.
+            try:
+                await task_repo.delete_interruption_token(paused_id)
+            except Exception:
+                logger.exception(
+                    "critical watcher: failed to clear token for killed %s", paused_id
+                )
+        else:
+            try:
+                token = await task_repo.get_interruption_token(paused_id)
+                if token:
+                    resume_req = mdl.TaskResumeRequest(
+                        type="resume_task_request",
+                        task_id=paused_id,
+                        token=token,
+                        labels=[f"resumed_after={task_id}"],
+                    )
+                    await tasks_service().call(
+                        resume_req.model_dump_json(exclude_none=True)
+                    )
+                    await task_repo.delete_interruption_token(paused_id)
+                    logger.info(
+                        "critical watcher: resumed %s after %s", paused_id, task_id
+                    )
+            except Exception:
+                logger.exception(
+                    "critical watcher: failed to resume %s after %s", paused_id, task_id
+                )
 
     except Exception:
         logger.exception("critical watcher failed for %s", task_id)
