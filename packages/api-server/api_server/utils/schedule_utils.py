@@ -52,9 +52,13 @@ def _occurrence_allowed(
     planned = _parse_planned_end(schedule_row.planned_end_at)
     if planned is not None:
         local_tz = datetime.now().astimezone().tzinfo
-        local_dt = candidate_dt_utc.astimezone(local_tz)
-        cand_time = local_dt.time()
-        if cand_time > planned:
+
+        candidate_local = candidate_dt_utc.astimezone(local_tz)
+        start_local = _ensure_utc_aware(schedule_row.start_from).astimezone(local_tz)
+
+        _, end_dt = _build_planned_window(candidate_local, start_local, planned)
+
+        if candidate_local > end_dt:
             return False
 
     return True
@@ -82,15 +86,18 @@ def should_skip_due_to_planned_end(
 
     local_tz = datetime.now().astimezone().tzinfo
     now_local = now_utc.astimezone(local_tz)
-    if candidate_dt_utc is None:
-        candidate_dt_local = now_local
-    else:
-        candidate_dt_local = candidate_dt_utc.astimezone(local_tz)
 
-    if candidate_dt_local.date() < now_local.date():
-        return True
+    candidate_local = (
+        candidate_dt_utc.astimezone(local_tz)
+        if candidate_dt_utc is not None
+        else now_local
+    )
 
-    if candidate_dt_local.date() == now_local.date() and now_local.time() > planned:
+    start_local = _ensure_utc_aware(schedule_row.start_from).astimezone(local_tz)
+
+    _, end_dt = _build_planned_window(now_local, start_local, planned)
+
+    if candidate_local > end_dt:
         return True
 
     return False
@@ -161,3 +168,19 @@ def compute_next_run(
         return None
     finally:
         schedule.datetime.datetime = orig_datetime
+
+
+def _build_planned_window(now_local, start_local, planned_end_time):
+    start_dt = datetime.combine(
+        now_local.date(), start_local.time(), tzinfo=now_local.tzinfo
+    )
+
+    end_dt = datetime.combine(
+        now_local.date(), planned_end_time, tzinfo=now_local.tzinfo
+    )
+
+    # overnight handling
+    if planned_end_time < start_local.time():
+        end_dt += timedelta(days=1)
+
+    return start_dt, end_dt
