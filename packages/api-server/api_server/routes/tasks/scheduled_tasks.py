@@ -33,7 +33,7 @@ from api_server.models import (
 )
 from api_server.models import tortoise_models as ttm
 from api_server.models.labels import Labels
-from api_server.repositories import TaskRepository
+from api_server.repositories import FleetRepository, TaskRepository
 from api_server.rmf_io import tasks_service
 from api_server.ros import ros_node
 from api_server.utils.schedule_utils import (
@@ -48,6 +48,7 @@ from api_server.utils.time_utils import (
     wall_millis_to_datetime,
 )
 
+from .priority import NORMAL_PRIORITY_VALUE, PRIORITY_LABEL_VALUES, task_priority_label
 from .tasks import post_dispatch_task
 
 router = FastIORouter(tags=["Tasks"])
@@ -307,7 +308,9 @@ async def _dispatch_schedule_task_request(
         schedule_row.get_id(),
         parent_task.id,
     )
-    await post_dispatch_task(dispatch_request, task_repo)
+    await post_dispatch_task(
+        dispatch_request, task_repo, FleetRepository(INTERNAL_USER)
+    )
     parent_task.last_ran = wall_millis_to_datetime(now_wall_millis())
     await parent_task.save(update_fields=["last_ran"])
     logger.info(
@@ -919,159 +922,207 @@ async def _dispatch_scheduled_schedule(schedule_id: int):
         )
 
 
+def _schedule_priority_value(schedule_row: ttm.ScheduledTaskSchedule) -> int:
+    """Read the priority of a schedule's stored task request.
+
+    `scheduled_task.task_request` is stored as a plain JSON dict, not a
+    TaskRequest model, so this mirrors `priority.priority_value` for dicts
+    rather than reusing it directly.
+    """
+    scheduled_task = schedule_row.scheduled_task
+    raw_task_request = (
+        getattr(scheduled_task, "task_request", None) if scheduled_task else None
+    )
+    if not isinstance(raw_task_request, dict):
+        return NORMAL_PRIORITY_VALUE
+    priority = raw_task_request.get("priority")
+    if isinstance(priority, dict):
+        value = priority.get("value")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    label = task_priority_label(raw_task_request.get("labels"))
+    if label is not None:
+        return PRIORITY_LABEL_VALUES[label]
+    return NORMAL_PRIORITY_VALUE
+
+
+async def _scheduler_tick(task_repo: TaskRepository) -> None:
+    """Run a single scheduler pass: cancel overdue schedules, then claim
+    and dispatch schedules due now, highest priority first among ties.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        logger.info("SCHEDULER TICK now=%s tzinfo=%s", now.isoformat(), now.tzinfo)
+        logger.info("NOW=%s type=%s", now, type(now))
+
+        overdue_schedules = await (
+            ttm.ScheduledTaskSchedule.filter(
+                planned_end_at__isnull=False,
+                start_from__isnull=False,
+            )
+            .select_related("scheduled_task")
+            .order_by("start_from", "_id")
+        )
+        for schedule_row in overdue_schedules:
+            await _cancel_overdue_schedule_tasks(schedule_row, task_repo, now)
+
+        # Query candidate schedules, then do the UTC comparison in Python so the
+        # scheduler remains consistent whether the DB round-trips naive or aware
+        # datetimes.
+        due_schedules = await (
+            ttm.ScheduledTaskSchedule.filter(
+                dispatched=False,
+            )
+            .select_related("scheduled_task")
+            .order_by("next_run_at", "_id")
+        )
+        logger.info("DUE COUNT=%s", len(due_schedules))
+
+        # Gathered here, then claimed/dispatched in priority order below —
+        # if two schedules are due in the same tick (e.g. a Normal and a
+        # Critical both starting at 10:00), the Critical must be claimed
+        # and dispatched first rather than whichever happened to sort
+        # first by next_run_at/_id.
+        ready_schedules: list[tuple[ttm.ScheduledTaskSchedule, datetime]] = []
+
+        for schedule_row in due_schedules:
+            if schedule_row.next_run_at is None:
+                next_run = compute_next_run(schedule_row, now)
+                if next_run is None:
+                    await ttm.ScheduledTaskSchedule.filter(
+                        _id=schedule_row.get_id()
+                    ).update(dispatched=True)
+                    continue
+                schedule_row.next_run_at = next_run
+                await schedule_row.save(update_fields=["next_run_at"])
+
+            if schedule_row.next_run_at is None:
+                continue
+
+            schedule_start = _ensure_utc_aware(schedule_row.next_run_at)
+
+            logger.info(
+                "DB next_run_at=%s type=%s tz=%s",
+                schedule_row.next_run_at,
+                type(schedule_row.next_run_at),
+                getattr(schedule_row.next_run_at, "tzinfo", None),
+            )
+
+            # Defensive tzinfo check: treat naive DB datetimes as UTC but log.
+            if schedule_row.next_run_at.tzinfo is None:
+                logger.warning(
+                    "schedule_id=%s has naive next_run_at, treating as UTC: %s",
+                    schedule_row.get_id(),
+                    schedule_row.next_run_at,
+                )
+
+            if schedule_start > now:
+                continue
+
+            if should_skip_due_to_planned_end(
+                schedule_row, now, candidate_dt_utc=schedule_start
+            ):
+                logger.info(
+                    "schedule_id=%s skipped because now=%s is past planned_end_at=%s",
+                    schedule_row.get_id(),
+                    now.isoformat(),
+                    schedule_row.planned_end_at,
+                )
+                await ttm.ScheduledTaskSchedule.filter(
+                    _id=schedule_row.get_id()
+                ).update(dispatched=True)
+                continue
+
+            # Check bounds (until, planned_end_at, except_dates) before claiming
+            if not _occurrence_allowed(
+                schedule_row, schedule_start, schedule_row.scheduled_task
+            ):
+                logger.info(
+                    "schedule_id=%s occurrence %s not allowed by bounds; marking finished",
+                    schedule_row.get_id(),
+                    schedule_start.isoformat(),
+                )
+                # Mark finished to avoid further attempts
+                await ttm.ScheduledTaskSchedule.filter(
+                    _id=schedule_row.get_id()
+                ).update(dispatched=True)
+                continue
+
+            logger.info(
+                "FOUND DUE TASK schedule_id=%s task_id=%s next_run_at=%s next_run_tz=%s now=%s now_tz=%s",
+                schedule_row.get_id(),
+                getattr(schedule_row.scheduled_task, "id", None),
+                schedule_start.isoformat(),
+                schedule_start.tzinfo,
+                now.isoformat(),
+                now.tzinfo,
+            )
+
+            ready_schedules.append((schedule_row, schedule_start))
+
+        # Highest priority first among schedules due in this same tick;
+        # ties broken by original start time / id for determinism.
+        ready_schedules.sort(
+            key=lambda item: (
+                -_schedule_priority_value(item[0]),
+                item[1],
+                item[0].get_id(),
+            )
+        )
+
+        for schedule_row, _schedule_start in ready_schedules:
+            # Atomically claim the schedule by primary key using Python attr name `_id`
+            schedule_id = schedule_row.get_id()
+            claimed = await ttm.ScheduledTaskSchedule.filter(
+                _id=schedule_id, dispatched=False
+            ).update(dispatched=True)
+            if not claimed:
+                logger.info(
+                    "SKIPPED CLAIMED schedule_id=%s task_id=%s",
+                    schedule_id,
+                    getattr(schedule_row.scheduled_task, "id", None),
+                )
+                continue
+
+            logger.info(
+                "scheduler triggered schedule_id=%s task_id=%s next_run_at=%s now=%s",
+                schedule_id,
+                getattr(schedule_row.scheduled_task, "id", None),
+                schedule_row.next_run_at.isoformat()
+                if schedule_row.next_run_at is not None
+                else None,
+                now.isoformat(),
+            )
+
+            # Create background task with primitive id only and attach error logger
+            task = asyncio.create_task(_dispatch_scheduled_schedule(schedule_id))
+
+            def _bg_done_callback(t: asyncio.Task, schedule_id: int = schedule_id):
+                try:
+                    exc = t.exception()
+                except asyncio.CancelledError:
+                    return
+                if exc:
+                    tb = "".join(
+                        traceback.format_exception(type(exc), exc, exc.__traceback__)
+                    )
+                    logger.error(
+                        "background dispatch failed schedule_id=%s exception=%s\n%s",
+                        schedule_id,
+                        exc,
+                        tb,
+                    )
+
+            task.add_done_callback(_bg_done_callback)
+    except Exception:
+        logger.exception("scheduler tick error")
+
+
 async def scheduler_loop(poll_interval: float = 1.0):
     logger.info("UTC scheduler loop started poll_interval=%s", poll_interval)
     task_repo = TaskRepository(INTERNAL_USER)
     while True:
-        try:
-            now = datetime.now(timezone.utc)
-            logger.info("SCHEDULER TICK now=%s tzinfo=%s", now.isoformat(), now.tzinfo)
-            logger.info("NOW=%s type=%s", now, type(now))
-
-            overdue_schedules = await (
-                ttm.ScheduledTaskSchedule.filter(
-                    planned_end_at__isnull=False,
-                    start_from__isnull=False,
-                )
-                .select_related("scheduled_task")
-                .order_by("start_from", "_id")
-            )
-            for schedule_row in overdue_schedules:
-                await _cancel_overdue_schedule_tasks(schedule_row, task_repo, now)
-
-            # Query candidate schedules, then do the UTC comparison in Python so the
-            # scheduler remains consistent whether the DB round-trips naive or aware
-            # datetimes.
-            due_schedules = await (
-                ttm.ScheduledTaskSchedule.filter(
-                    dispatched=False,
-                )
-                .select_related("scheduled_task")
-                .order_by("next_run_at", "_id")
-            )
-            logger.info("DUE COUNT=%s", len(due_schedules))
-
-            for schedule_row in due_schedules:
-                if schedule_row.next_run_at is None:
-                    next_run = compute_next_run(schedule_row, now)
-                    if next_run is None:
-                        await ttm.ScheduledTaskSchedule.filter(
-                            _id=schedule_row.get_id()
-                        ).update(dispatched=True)
-                        continue
-                    schedule_row.next_run_at = next_run
-                    await schedule_row.save(update_fields=["next_run_at"])
-
-                if schedule_row.next_run_at is None:
-                    continue
-
-                schedule_start = _ensure_utc_aware(schedule_row.next_run_at)
-
-                logger.info(
-                    "DB next_run_at=%s type=%s tz=%s",
-                    schedule_row.next_run_at,
-                    type(schedule_row.next_run_at),
-                    getattr(schedule_row.next_run_at, "tzinfo", None),
-                )
-
-                # Defensive tzinfo check: treat naive DB datetimes as UTC but log.
-                if schedule_row.next_run_at.tzinfo is None:
-                    logger.warning(
-                        "schedule_id=%s has naive next_run_at, treating as UTC: %s",
-                        schedule_row.get_id(),
-                        schedule_row.next_run_at,
-                    )
-
-                if schedule_start > now:
-                    continue
-
-                if should_skip_due_to_planned_end(
-                    schedule_row, now, candidate_dt_utc=schedule_start
-                ):
-                    logger.info(
-                        "schedule_id=%s skipped because now=%s is past planned_end_at=%s",
-                        schedule_row.get_id(),
-                        now.isoformat(),
-                        schedule_row.planned_end_at,
-                    )
-                    await ttm.ScheduledTaskSchedule.filter(
-                        _id=schedule_row.get_id()
-                    ).update(dispatched=True)
-                    continue
-
-                # Check bounds (until, planned_end_at, except_dates) before claiming
-                if not _occurrence_allowed(
-                    schedule_row, schedule_start, schedule_row.scheduled_task
-                ):
-                    logger.info(
-                        "schedule_id=%s occurrence %s not allowed by bounds; marking finished",
-                        schedule_row.get_id(),
-                        schedule_start.isoformat(),
-                    )
-                    # Mark finished to avoid further attempts
-                    await ttm.ScheduledTaskSchedule.filter(
-                        _id=schedule_row.get_id()
-                    ).update(dispatched=True)
-                    continue
-
-                logger.info(
-                    "FOUND DUE TASK schedule_id=%s task_id=%s next_run_at=%s next_run_tz=%s now=%s now_tz=%s",
-                    schedule_row.get_id(),
-                    getattr(schedule_row.scheduled_task, "id", None),
-                    schedule_start.isoformat(),
-                    schedule_start.tzinfo,
-                    now.isoformat(),
-                    now.tzinfo,
-                )
-
-                # Atomically claim the schedule by primary key using Python attr name `_id`
-                schedule_id = schedule_row.get_id()
-                claimed = await ttm.ScheduledTaskSchedule.filter(
-                    _id=schedule_id, dispatched=False
-                ).update(dispatched=True)
-                if not claimed:
-                    logger.info(
-                        "SKIPPED CLAIMED schedule_id=%s task_id=%s",
-                        schedule_id,
-                        getattr(schedule_row.scheduled_task, "id", None),
-                    )
-                    continue
-
-                logger.info(
-                    "scheduler triggered schedule_id=%s task_id=%s next_run_at=%s now=%s",
-                    schedule_id,
-                    getattr(schedule_row.scheduled_task, "id", None),
-                    schedule_row.next_run_at.isoformat()
-                    if schedule_row.next_run_at is not None
-                    else None,
-                    now.isoformat(),
-                )
-
-                # Create background task with primitive id only and attach error logger
-                task = asyncio.create_task(_dispatch_scheduled_schedule(schedule_id))
-
-                def _bg_done_callback(t: asyncio.Task):
-                    try:
-                        exc = t.exception()
-                    except asyncio.CancelledError:
-                        return
-                    if exc:
-                        tb = "".join(
-                            traceback.format_exception(
-                                type(exc), exc, exc.__traceback__
-                            )
-                        )
-                        logger.error(
-                            "background dispatch failed schedule_id=%s exception=%s\n%s",
-                            schedule_id,
-                            exc,
-                            tb,
-                        )
-
-                task.add_done_callback(_bg_done_callback)
-        except Exception:
-            logger.exception("scheduler loop error")
-
+        await _scheduler_tick(task_repo)
         await asyncio.sleep(poll_interval)
 
 

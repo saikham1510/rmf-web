@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pydantic
+
 from api_server import models as mdl
 from api_server.models import TaskEventLog, TaskState
 from api_server.repositories import TaskRepository
@@ -371,108 +372,455 @@ class TestDispatchTask(AppFixture):
         self.assertEqual("test", resp.json()["category"])
         self.assertEqual("description", resp.json()["description"])
 
-    def test_critical_preemption_kills_before_dispatch(self):
+    @staticmethod
+    def _make_active_task_state(
+        task_id: str, fleet_name: str, robot_name: str
+    ) -> mdl.TaskState:
+        return mdl.TaskState.model_validate(
+            {
+                "booking": {"id": task_id},
+                "status": "underway",
+                "assigned_to": {"group": fleet_name, "name": robot_name},
+                "dispatch": {
+                    "status": "dispatched",
+                    "assignment": {
+                        "fleet_name": fleet_name,
+                        "expected_robot_name": robot_name,
+                    },
+                },
+            }
+        )
+
+    def test_critical_preemption_skips_redispatch_when_self_assigned(self):
+        # If RMF auctions the critical's own (already-queued) booking onto
+        # the freed robot on its own, we must not create any second task for
+        # it — only the kill and the victim's requeue should happen.
         portal = self.get_portal()
         fleet_name = "test_fleet"
         robot_name = "test_robot"
-        paused_task_id = str(uuid4())
+        victim_task_id = str(uuid4())
         critical_task_id = str(uuid4())
-        forced_task_id = "forced_critical_task"
+        requeued_task_id = "requeued_victim_task"
 
-        paused_task = make_task_state(task_id=paused_task_id)
-        paused_task.assigned_to = mdl.AssignedTo(group=fleet_name, name=robot_name)
-        paused_task.status = mdl.TaskStatus.underway
-        paused_task.dispatch = mdl.Dispatch(
-            status=mdl.Status2.dispatched,
-            assignment=mdl.Assignment(
-                fleet_name=fleet_name,
-                expected_robot_name=robot_name,
-            ),
+        victim_task = self._make_active_task_state(
+            victim_task_id, fleet_name, robot_name
         )
-
+        victim_request = mdl.TaskRequest(
+            category="patrol",
+            description="victim",
+            labels=["priority=urgent"],
+        )
         critical_request = mdl.TaskRequest(
-            category="test",
+            category="patrol",
             description="critical dispatch",
-            labels=["critical=true"],
+            labels=["priority=critical"],
         )
-
-        completed_state = make_task_state(task_id=forced_task_id)
-        completed_state.status = mdl.TaskStatus.completed
 
         call_order = []
-        fleet_poll_count = 0
-
-        async def fake_get_fleet_state(name: str):
-            nonlocal fleet_poll_count
-            fleet_poll_count += 1
-            return mdl.FleetState(
-                name=name,
-                robots={
-                    robot_name: mdl.RobotState(
-                        name=robot_name,
-                        status="working",
-                        task_id=paused_task_id,
-                    )
-                },
-            )
+        requeue_payloads = []
 
         async def fake_service_call(payload: str, timeout=None):
             data = json.loads(payload)
             request_type = data["type"]
-            if request_type == "interrupt_task_request":
-                call_order.append("interrupt")
-                return '{"success": true, "token": "token"}'
             if request_type == "kill_task_request":
                 call_order.append("kill")
+                self.assertEqual(victim_task_id, data["task_id"])
                 return '{"success": true}'
-            if request_type == "robot_task_request":
-                call_order.append("dispatch")
-                self.assertGreaterEqual(
-                    fleet_poll_count,
-                    1,
-                    "expected the dispatch path to read fleet state before dispatch",
-                )
-                self.assertEqual(
-                    call_order[:3],
-                    ["interrupt", "kill", "dispatch"],
-                    "critical dispatch must happen only after interrupt and kill",
-                )
-                return f'{{"success": true, "state": {{"booking": {{"id": "{forced_task_id}"}}}}}}'
-            if request_type == "cancel_task_request":
-                call_order.append("cancel")
-                return '{"success": true}'
-            if request_type == "resume_task_request":
-                call_order.append("resume")
-                return '{"success": true}'
-            raise AssertionError(f"unexpected RMF request type: {request_type}")
+            if request_type == "dispatch_task_request":
+                call_order.append("requeue_victim")
+                requeue_payloads.append(data)
+                return f'{{"success": true, "state": {{"booking": {{"id": "{requeued_task_id}"}}}}}}'
+            raise AssertionError(
+                f"unexpected RMF request type: {request_type} — the critical "
+                "self-assigned, nothing else should have been dispatched"
+            )
+
+        async def fake_get_fleet_state(name: str):
+            return mdl.FleetState(
+                name=name,
+                robots={
+                    robot_name: mdl.RobotState(
+                        name=robot_name, status="idle", task_id=""
+                    )
+                },
+            )
+
+        def fake_get_task_request(task_id: str):
+            if task_id == critical_task_id:
+                return critical_request
+            if task_id == victim_task_id:
+                return victim_request
+            return None
 
         task_repo = AsyncMock(spec=TaskRepository)
-        task_repo.query_task_states.return_value = [paused_task]
-        task_repo.get_task_request.return_value = critical_request
-        task_repo.get_task_state.side_effect = (
-            lambda task_id: completed_state if task_id == forced_task_id else None
-        )
+        task_repo.query_task_states.return_value = [victim_task]
+        task_repo.get_task_request.side_effect = fake_get_task_request
+        task_repo.get_task_state.return_value = None
 
         fleet_repo = AsyncMock()
         fleet_repo.get_fleet_state.side_effect = fake_get_fleet_state
 
         with patch.object(
-            tasks_service(), "call", side_effect=fake_service_call
-        ), patch.object(tasks_route, "_spawn_background_task", return_value=None):
+            tasks_route, "tasks_service"
+        ) as mock_tasks_service, patch.object(
+            tasks_route, "_spawn_background_task", return_value=None
+        ), patch.object(
+            tasks_route,
+            "_wait_for_critical_self_assignment",
+            AsyncMock(return_value=True),
+        ):
+            mock_tasks_service.return_value.call = AsyncMock(
+                side_effect=fake_service_call
+            )
             portal.call(
                 tasks_route._handle_critical_preemption,
                 critical_task_id,
                 task_repo,
                 fleet_repo,
-                True,
+                0,
             )
 
-        self.assertGreaterEqual(fleet_poll_count, 1)
-        self.assertIn("kill", call_order)
-        self.assertIn("dispatch", call_order)
-        self.assertLess(call_order.index("kill"), call_order.index("dispatch"))
+        self.assertEqual(["kill", "requeue_victim"], call_order)
+        requeued_request = requeue_payloads[0]["request"]
+        self.assertIn(f"requeued_from={victim_task_id}", requeued_request["labels"])
+
+    def test_critical_preemption_falls_back_to_redispatch_when_stalled(self):
+        # If the critical's own booking does NOT get auctioned onto the
+        # freed robot within the wait window, the fallback must cleanly
+        # cancel it (checked, unlike the old code) and only then re-dispatch
+        # through the normal auction — never via a direct robot_task_request,
+        # and never without confirming the cancel first.
+        portal = self.get_portal()
+        fleet_name = "test_fleet"
+        robot_name = "test_robot"
+        victim_task_id = str(uuid4())
+        critical_task_id = str(uuid4())
+        redispatched_task_id = "redispatched_critical_task"
+        requeued_task_id = "requeued_victim_task"
+
+        victim_task = self._make_active_task_state(
+            victim_task_id, fleet_name, robot_name
+        )
+        victim_request = mdl.TaskRequest(
+            category="patrol",
+            description="victim",
+            labels=["priority=urgent"],
+        )
+        critical_request = mdl.TaskRequest(
+            category="patrol",
+            description="critical dispatch",
+            labels=["priority=critical"],
+        )
+
+        call_order = []
+        dispatch_payloads = []
+
+        async def fake_service_call(payload: str, timeout=None):
+            data = json.loads(payload)
+            request_type = data["type"]
+            if request_type == "kill_task_request":
+                call_order.append("kill")
+                self.assertEqual(victim_task_id, data["task_id"])
+                return '{"success": true}'
+            if request_type == "robot_task_request":
+                raise AssertionError(
+                    "must never force-assign via robot_task_request anymore"
+                )
+            if request_type == "cancel_task_request":
+                call_order.append("cancel")
+                self.assertEqual(critical_task_id, data["task_id"])
+                return '{"success": true}'
+            if request_type == "dispatch_task_request":
+                labels = data["request"].get("labels") or []
+                dispatch_payloads.append(data)
+                if any(label == f"forced_from={critical_task_id}" for label in labels):
+                    call_order.append("redispatch_critical")
+                    self.assertIn(
+                        "cancel",
+                        call_order,
+                        "re-dispatch must only happen after the cancel is " "confirmed",
+                    )
+                    return (
+                        '{"success": true, "state": {"booking": '
+                        f'{{"id": "{redispatched_task_id}"}}}}}}'
+                    )
+                if any(label == f"requeued_from={victim_task_id}" for label in labels):
+                    call_order.append("requeue_victim")
+                    return (
+                        '{"success": true, "state": {"booking": '
+                        f'{{"id": "{requeued_task_id}"}}}}}}'
+                    )
+                raise AssertionError(f"unexpected dispatch labels: {labels}")
+            raise AssertionError(f"unexpected RMF request type: {request_type}")
+
+        async def fake_get_fleet_state(name: str):
+            return mdl.FleetState(
+                name=name,
+                robots={
+                    robot_name: mdl.RobotState(
+                        name=robot_name, status="idle", task_id=""
+                    )
+                },
+            )
+
+        def fake_get_task_request(task_id: str):
+            if task_id == critical_task_id:
+                return critical_request
+            if task_id == victim_task_id:
+                return victim_request
+            return None
+
+        task_repo = AsyncMock(spec=TaskRepository)
+        task_repo.query_task_states.return_value = [victim_task]
+        task_repo.get_task_request.side_effect = fake_get_task_request
+        task_repo.get_task_state.return_value = None
+
+        fleet_repo = AsyncMock()
+        fleet_repo.get_fleet_state.side_effect = fake_get_fleet_state
+
+        with patch.object(
+            tasks_route, "tasks_service"
+        ) as mock_tasks_service, patch.object(
+            tasks_route, "_spawn_background_task", return_value=None
+        ), patch.object(
+            tasks_route,
+            "_wait_for_critical_self_assignment",
+            AsyncMock(return_value=False),
+        ):
+            mock_tasks_service.return_value.call = AsyncMock(
+                side_effect=fake_service_call
+            )
+            portal.call(
+                tasks_route._handle_critical_preemption,
+                critical_task_id,
+                task_repo,
+                fleet_repo,
+                0,
+            )
+
+        self.assertEqual(
+            ["kill", "cancel", "redispatch_critical", "requeue_victim"], call_order
+        )
+        requeue_payload = next(
+            p
+            for p in dispatch_payloads
+            if f"requeued_from={victim_task_id}" in (p["request"].get("labels") or [])
+        )
+        self.assertEqual(
+            {"type": "binary", "value": 1},
+            requeue_payload["request"]["priority"],
+            "requeued victim must keep its original priority",
+        )
         self.assertTrue(task_repo.save_task_request.called)
         self.assertTrue(task_repo.save_task_state.called)
+
+    def test_redispatch_stalled_critical_aborts_without_duplicating_when_cancel_fails(
+        self,
+    ):
+        # If we can't confirm the cancel succeeded, we must not dispatch a
+        # fresh copy — that would recreate exactly the duplicate-task bug
+        # this whole redesign exists to remove.
+        portal = self.get_portal()
+        critical_task_id = str(uuid4())
+
+        task_repo = AsyncMock(spec=TaskRepository)
+        fleet_repo = AsyncMock()
+        service_call = AsyncMock(return_value='{"success": false}')
+
+        with patch.object(tasks_route, "tasks_service") as mock_tasks_service:
+            mock_tasks_service.return_value.call = service_call
+            result = portal.call(
+                tasks_route._redispatch_stalled_critical,
+                critical_task_id,
+                "test_fleet",
+                task_repo,
+                fleet_repo,
+                0,
+            )
+
+        self.assertIsNone(result)
+        service_call.assert_awaited_once()
+        task_repo.get_task_request.assert_not_called()
+
+    def test_critical_does_not_preempt_equal_priority(self):
+        portal = self.get_portal()
+        victim_task_id = str(uuid4())
+        critical_task_id = str(uuid4())
+
+        victim_task = self._make_active_task_state(
+            victim_task_id, "test_fleet", "test_robot"
+        )
+        running_critical_request = mdl.TaskRequest(
+            category="patrol",
+            description="running critical",
+            labels=["priority=critical"],
+        )
+        incoming_critical_request = mdl.TaskRequest(
+            category="patrol",
+            description="incoming critical",
+            labels=["priority=critical"],
+        )
+
+        def fake_get_task_request(task_id: str):
+            if task_id == critical_task_id:
+                return incoming_critical_request
+            return running_critical_request
+
+        task_repo = AsyncMock(spec=TaskRepository)
+        task_repo.query_task_states.return_value = [victim_task]
+        task_repo.get_task_request.side_effect = fake_get_task_request
+        task_repo.get_task_state.return_value = None
+
+        fleet_repo = AsyncMock()
+        service_call = AsyncMock(
+            side_effect=AssertionError("a critical must not preempt a critical")
+        )
+
+        with patch.object(
+            tasks_route, "tasks_service"
+        ) as mock_tasks_service, patch.object(
+            tasks_route, "_spawn_background_task", return_value=None
+        ):
+            mock_tasks_service.return_value.call = service_call
+            portal.call(
+                tasks_route._handle_critical_preemption,
+                critical_task_id,
+                task_repo,
+                fleet_repo,
+                0,
+            )
+
+        service_call.assert_not_called()
+
+    def test_critical_watcher_stands_down_when_own_task_active(self):
+        portal = self.get_portal()
+        critical_task_id = str(uuid4())
+
+        task_repo = AsyncMock(spec=TaskRepository)
+        task_repo.get_task_state.return_value = self._make_active_task_state(
+            critical_task_id, "test_fleet", "test_robot"
+        )
+
+        fleet_repo = AsyncMock()
+        service_call = AsyncMock()
+
+        with patch.object(
+            tasks_route, "tasks_service"
+        ) as mock_tasks_service, patch.object(
+            tasks_route, "_spawn_background_task", return_value=None
+        ):
+            mock_tasks_service.return_value.call = service_call
+            portal.call(
+                tasks_route._handle_critical_preemption,
+                critical_task_id,
+                task_repo,
+                fleet_repo,
+                0,
+            )
+
+        task_repo.query_task_states.assert_not_called()
+        service_call.assert_not_called()
+
+    def test_select_preemption_victim_skips_equal_priority_candidates(self):
+        portal = self.get_portal()
+        critical_id = str(uuid4())
+        urgent_id = str(uuid4())
+        candidates = [
+            self._make_active_task_state(critical_id, "test_fleet", "robot_1"),
+            self._make_active_task_state(urgent_id, "test_fleet", "robot_2"),
+        ]
+        requests = {
+            critical_id: mdl.TaskRequest(
+                category="patrol",
+                description="running critical",
+                labels=["priority=critical"],
+            ),
+            urgent_id: mdl.TaskRequest(
+                category="patrol",
+                description="running urgent",
+                labels=["priority=urgent"],
+            ),
+        }
+
+        task_repo = AsyncMock(spec=TaskRepository)
+        task_repo.get_task_request.side_effect = lambda task_id: requests.get(task_id)
+
+        victim = portal.call(
+            tasks_route._select_preemption_victim,
+            candidates,
+            "incoming-critical-id",
+            2,
+            "patrol",
+            task_repo,
+        )
+
+        self.assertIsNotNone(victim)
+        self.assertEqual(urgent_id, victim.booking.id)
+
+    def test_select_preemption_victim_skips_different_category(self):
+        # Fleets are function-specific (clean/patrol/deliver); a critical
+        # clean must never kill an active patrol just because it happens to
+        # be the first active task found — that fleet could never have
+        # served the clean anyway.
+        portal = self.get_portal()
+        patrol_id = str(uuid4())
+        clean_id = str(uuid4())
+        candidates = [
+            self._make_active_task_state(patrol_id, "patrol_fleet", "robot_1"),
+            self._make_active_task_state(clean_id, "clean_fleet", "robot_2"),
+        ]
+        requests = {
+            patrol_id: mdl.TaskRequest(
+                category="patrol",
+                description="running patrol",
+                labels=["priority=normal"],
+            ),
+            clean_id: mdl.TaskRequest(
+                category="clean",
+                description="running clean",
+                labels=["priority=normal"],
+            ),
+        }
+
+        task_repo = AsyncMock(spec=TaskRepository)
+        task_repo.get_task_request.side_effect = lambda task_id: requests.get(task_id)
+
+        victim = portal.call(
+            tasks_route._select_preemption_victim,
+            candidates,
+            "incoming-critical-clean-id",
+            2,
+            "clean",
+            task_repo,
+        )
+
+        self.assertIsNotNone(victim)
+        self.assertEqual(clean_id, victim.booking.id)
+
+    def test_requeue_skips_schedule_runs(self):
+        portal = self.get_portal()
+        victim_task_id = str(uuid4())
+
+        task_repo = AsyncMock(spec=TaskRepository)
+        task_repo.get_task_request.return_value = mdl.TaskRequest(
+            category="patrol",
+            description="schedule run",
+            labels=["scheduled_schedule_id=3", "priority=normal"],
+        )
+        fleet_repo = AsyncMock()
+        service_call = AsyncMock()
+
+        with patch.object(tasks_route, "tasks_service") as mock_tasks_service:
+            mock_tasks_service.return_value.call = service_call
+            portal.call(
+                tasks_route._requeue_preempted_task,
+                victim_task_id,
+                "critical-id",
+                task_repo,
+                fleet_repo,
+            )
+
+        service_call.assert_not_called()
 
     def test_wait_for_robot_stop_uses_task_id_release(self):
         portal = self.get_portal()

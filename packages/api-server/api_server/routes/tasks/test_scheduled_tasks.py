@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -224,7 +225,9 @@ class TestScheduledTasksRoute(AppFixture):
         schedule_id = portal.call(create_schedule)
         captured_requests = []
 
-        async def fake_post_dispatch_task(dispatch_request, _task_repo):
+        async def fake_post_dispatch_task(
+            dispatch_request, _task_repo, _fleet_repo=None
+        ):
             captured_requests.append(dispatch_request)
 
         with patch.object(
@@ -361,7 +364,9 @@ class TestScheduledTasksRoute(AppFixture):
 
         fake_repo.query_task_states = AsyncMock(side_effect=fake_query_task_states)
 
-        async def fake_post_dispatch_task(dispatch_request, _task_repo):
+        async def fake_post_dispatch_task(
+            dispatch_request, _task_repo, _fleet_repo=None
+        ):
             captured_requests.append(dispatch_request)
 
         with patch.object(
@@ -431,7 +436,9 @@ class TestScheduledTasksRoute(AppFixture):
         fake_repo = MagicMock()
         fake_repo.query_task_states = AsyncMock(return_value=[])
 
-        async def fake_post_dispatch_task(dispatch_request, _task_repo):
+        async def fake_post_dispatch_task(
+            dispatch_request, _task_repo, _fleet_repo=None
+        ):
             captured_requests.append(dispatch_request)
 
         with patch.object(
@@ -511,7 +518,9 @@ class TestScheduledTasksRoute(AppFixture):
 
         fake_repo.query_task_states = AsyncMock(side_effect=fake_query_task_states)
 
-        async def fake_post_dispatch_task(dispatch_request, _task_repo):
+        async def fake_post_dispatch_task(
+            dispatch_request, _task_repo, _fleet_repo=None
+        ):
             captured_requests.append(dispatch_request)
 
         with patch.object(
@@ -590,7 +599,9 @@ class TestScheduledTasksRoute(AppFixture):
 
         fake_repo.query_task_states = AsyncMock(side_effect=fake_query_task_states)
 
-        async def fake_post_dispatch_task(dispatch_request, _task_repo):
+        async def fake_post_dispatch_task(
+            dispatch_request, _task_repo, _fleet_repo=None
+        ):
             captured_requests.append(dispatch_request)
 
         with patch.object(
@@ -656,7 +667,9 @@ class TestScheduledTasksRoute(AppFixture):
 
         fake_repo.query_task_states = AsyncMock(side_effect=fake_query_task_states)
 
-        async def fake_post_dispatch_task(dispatch_request, _task_repo):
+        async def fake_post_dispatch_task(
+            dispatch_request, _task_repo, _fleet_repo=None
+        ):
             captured_requests.append(dispatch_request)
 
         with patch.object(
@@ -724,7 +737,9 @@ class TestScheduledTasksRoute(AppFixture):
 
         fake_repo.query_task_states = AsyncMock(side_effect=fake_query_task_states)
 
-        async def fake_post_dispatch_task(dispatch_request, _task_repo):
+        async def fake_post_dispatch_task(
+            dispatch_request, _task_repo, _fleet_repo=None
+        ):
             captured_requests.append(dispatch_request)
 
         with patch.object(
@@ -901,3 +916,109 @@ class TestScheduledTasksRoute(AppFixture):
 
         self.assertTrue(cancelled)
         mock_service.call.assert_awaited_once()
+
+    def test_schedule_priority_value_reads_priority_dict_from_json(self):
+        schedule_row = MagicMock()
+        schedule_row.scheduled_task.task_request = {
+            "category": "patrol",
+            "description": {},
+            "priority": {"type": "binary", "value": 2},
+        }
+        self.assertEqual(
+            2, scheduled_tasks_module._schedule_priority_value(schedule_row)
+        )
+
+    def test_schedule_priority_value_falls_back_to_labels(self):
+        schedule_row = MagicMock()
+        schedule_row.scheduled_task.task_request = {
+            "category": "patrol",
+            "description": {},
+            "labels": ["priority=urgent"],
+        }
+        self.assertEqual(
+            1, scheduled_tasks_module._schedule_priority_value(schedule_row)
+        )
+
+    def test_schedule_priority_value_defaults_to_normal(self):
+        schedule_row = MagicMock()
+        schedule_row.scheduled_task.task_request = {
+            "category": "patrol",
+            "description": {},
+        }
+        self.assertEqual(
+            0, scheduled_tasks_module._schedule_priority_value(schedule_row)
+        )
+
+    def test_scheduler_tick_dispatches_same_time_critical_before_normal(self):
+        # Two schedules due in the same tick (e.g. both set for 10:00): the
+        # Critical must be claimed and dispatched first, not whichever
+        # happened to sort first by next_run_at/_id.
+        portal = self.get_portal()
+        due_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+        async def create_schedules() -> tuple[int, int]:
+            normal_task = await ttm.ScheduledTask.create(
+                task_request={
+                    "category": "patrol",
+                    "description": {"places": ["wp1"], "rounds": 1},
+                    "priority": {"type": "binary", "value": 0},
+                },
+                created_by="test",
+            )
+            normal_schedule = await ttm.ScheduledTaskSchedule.create(
+                scheduled_task=normal_task,
+                period=ttm.ScheduledTaskSchedule.Period.Day,
+                start_from=due_at,
+                next_run_at=due_at,
+                dispatched=False,
+            )
+
+            critical_task = await ttm.ScheduledTask.create(
+                task_request={
+                    "category": "patrol",
+                    "description": {"places": ["wp1"], "rounds": 1},
+                    "priority": {"type": "binary", "value": 2},
+                },
+                created_by="test",
+            )
+            critical_schedule = await ttm.ScheduledTaskSchedule.create(
+                scheduled_task=critical_task,
+                period=ttm.ScheduledTaskSchedule.Period.Day,
+                start_from=due_at,
+                next_run_at=due_at,
+                dispatched=False,
+            )
+            # Normal's row id sorts before Critical's, so a naive
+            # next_run_at/_id ordering would dispatch it first — the
+            # priority sort must override that.
+            self.assertLess(normal_schedule.get_id(), critical_schedule.get_id())
+            return normal_schedule.get_id(), critical_schedule.get_id()
+
+        normal_id, critical_id = portal.call(create_schedules)
+
+        dispatch_order: list[int] = []
+
+        async def fake_dispatch(schedule_id: int) -> None:
+            dispatch_order.append(schedule_id)
+
+        # Other tests in this class may leave schedules with planned_end_at
+        # set in the shared test DB; _scheduler_tick's overdue-schedule pass
+        # will pick those up too, so task_repo must tolerate being awaited.
+        task_repo = MagicMock()
+        task_repo.query_task_states = AsyncMock(return_value=[])
+
+        async def run_tick() -> None:
+            await scheduled_tasks_module._scheduler_tick(task_repo)
+            # _scheduler_tick fires each dispatch via asyncio.create_task and
+            # returns immediately; give the event loop a turn to run them
+            # before inspecting dispatch_order.
+            await asyncio.sleep(0.05)
+
+        with patch.object(
+            scheduled_tasks_module,
+            "_dispatch_scheduled_schedule",
+            side_effect=fake_dispatch,
+        ):
+            portal.call(run_tick)
+
+        self.assertEqual([critical_id, normal_id], dispatch_order)

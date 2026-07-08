@@ -29,17 +29,15 @@ from api_server.rmf_io import task_events, tasks_service
 from api_server.ros import ros_node
 from api_server.utils.time_utils import real_to_sim
 
+from .priority import (
+    CRITICAL_PRIORITY_VALUE,
+    PRIORITY_LABEL_VALUES,
+    can_preempt,
+    priority_value,
+    task_priority_label,
+)
+
 router = FastIORouter(tags=["Tasks"])
-
-NORMAL_PRIORITY_VALUE = 0
-URGENT_PRIORITY_VALUE = 1
-CRITICAL_PRIORITY_VALUE = 2
-
-PRIORITY_LABEL_VALUES = {
-    "normal": NORMAL_PRIORITY_VALUE,
-    "urgent": URGENT_PRIORITY_VALUE,
-    "critical": CRITICAL_PRIORITY_VALUE,
-}
 
 
 def _use_sim_time() -> bool:
@@ -236,8 +234,8 @@ async def post_dispatch_task(
         task_state.booking.id,
         task_state.booking.id,
     )
-    # If the original request is critical, spawn a watcher to interrupt the
-    # awarded robot's active task and resume it after completion.
+    # If the original request is critical, spawn a watcher to preempt a
+    # lower-priority active task and requeue it after the critical is placed.
     try:
         if is_critical_request:
             # spawn background watcher (fire-and-forget)
@@ -246,7 +244,6 @@ async def post_dispatch_task(
                     task_state.booking.id,
                     task_repo,
                     fleet_repo,
-                    interrupt_immediately=True,
                 )
             )
     except Exception:
@@ -254,33 +251,8 @@ async def post_dispatch_task(
     return resp
 
 
-def _task_priority_label(labels: Optional[List[str]]) -> Optional[str]:
-    if not labels:
-        return None
-
-    priority_label = None
-    for label in labels:
-        normalized = label.lower().strip()
-        if normalized in ("critical=true", "preempt=interrupt", "priority=critical"):
-            return "critical"
-        if normalized in ("urgent=true", "priority=urgent"):
-            priority_label = priority_label or "urgent"
-            continue
-        if normalized in ("normal=true", "priority=normal"):
-            priority_label = priority_label or "normal"
-            continue
-        if normalized == "critical":
-            return "critical"
-        if normalized == "urgent":
-            priority_label = priority_label or "urgent"
-            continue
-        if normalized == "normal":
-            priority_label = priority_label or "normal"
-    return priority_label
-
-
 def _apply_priority_labels(task_request: mdl.TaskRequest) -> Optional[str]:
-    priority_label = _task_priority_label(task_request.labels)
+    priority_label = task_priority_label(task_request.labels)
     if priority_label is None:
         return None
 
@@ -292,10 +264,7 @@ def _apply_priority_labels(task_request: mdl.TaskRequest) -> Optional[str]:
 
 
 def _is_critical_task_request(task_request: mdl.TaskRequest) -> bool:
-    priority = getattr(task_request, "priority", None)
-    if isinstance(priority, dict) and priority.get("value") == CRITICAL_PRIORITY_VALUE:
-        return True
-    return _task_priority_label(getattr(task_request, "labels", None)) == "critical"
+    return priority_value(task_request) >= CRITICAL_PRIORITY_VALUE
 
 
 def _spawn_background_task(coro):
@@ -315,35 +284,19 @@ def _status_text(status: object | None) -> Optional[str]:
     return str(getattr(status, "value", status))
 
 
-def _is_interrupt_success(interrupt_response_json: str) -> bool:
+def _is_service_success(response_json: str) -> bool:
     try:
-        interrupt_response = json.loads(interrupt_response_json)
+        response = json.loads(response_json)
     except Exception:
         return False
 
-    if isinstance(interrupt_response, dict):
-        success = interrupt_response.get("success", False)
+    if isinstance(response, dict):
+        success = response.get("success", False)
         if hasattr(success, "root"):
             return bool(success.root)
         return bool(success)
 
     return False
-
-
-def _can_dispatch_critical(
-    robot_status: object | None,
-    robot_task_id: Optional[str],
-    paused_task_id: str,
-) -> bool:
-    if robot_task_id == paused_task_id:
-        return False
-
-    return _status_text(robot_status) in {
-        "idle",
-        "paused",
-        "interrupted",
-        "cancelled",
-    }
 
 
 def _robot_is_released(
@@ -379,23 +332,6 @@ async def _wait_for_robot_stop(
         await asyncio.sleep(0.2)
 
     return False, last_status
-
-
-async def _interrupt_watchdog(
-    robot_name: Optional[str],
-    paused_task_id: str,
-    ready_event: asyncio.Event,
-    timeout: float = 10.0,
-) -> None:
-    try:
-        await asyncio.wait_for(ready_event.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.warning(
-            "interrupt watchdog: robot=%s task_id=%s still not ready after %ss",
-            robot_name,
-            paused_task_id,
-            timeout,
-        )
 
 
 def _utc_now_iso() -> str:
@@ -503,527 +439,626 @@ def _extract_assigned_robot_name(task_state: mdl.TaskState) -> Optional[str]:
     return getattr(assigned_to, "name", None) if assigned_to else None
 
 
+TERMINAL_TASK_STATUSES = {"completed", "failed", "canceled", "killed"}
+ACTIVE_TASK_STATUSES = {"underway", "blocked", "delayed", "standby"}
+PREEMPTION_WATCH_WINDOW_S = 30.0
+PREEMPTION_POLL_INTERVAL_S = 1.0
+# Every individual RMF call made by the preemption pipeline (kill, forced
+# dispatch, cancel) must be bounded well below RmfService.call's 120s
+# default. Without this, a single hung call keeps the preemption lock held
+# for up to two minutes, silently blocking every other critical in the
+# meantime (observed as "criticals stop preempting until the server is
+# restarted").
+PREEMPTION_RMF_CALL_TIMEOUT_S = 5.0
+# Hard ceiling on the whole post-kill sequence (wait-for-stop, forced
+# dispatch, requeue), run outside the lock. Belt-and-suspenders: bounds
+# total time even if a step misbehaves in a way per-call timeouts don't
+# catch.
+PREEMPTION_FINISH_TIMEOUT_S = 20.0
+# How long to wait, after requeueing a killed victim, for RMF to actually
+# assign it a robot before logging a diagnostic. This never re-dispatches —
+# the requeued task may correctly be waiting for its own fleet's only robot
+# to finish the critical, and resubmitting here would risk a duplicate
+# physical task.
+REQUEUE_VERIFICATION_TIMEOUT_S = 10.0
+# After the victim is killed and the robot is confirmed free, how long to
+# wait for the critical's own (already-queued) booking to be auctioned onto
+# it before falling back to a clean cancel + re-dispatch. RMF's dispatcher
+# does not appear to automatically re-bid a task once its only capable
+# robot frees up, so this window is expected to be exhausted often — the
+# fallback exists so the critical still runs even when that's true, without
+# ever leaving two live RMF tasks for one critical (unlike the old
+# unconditional robot_task_request "direct assign", which always created a
+# second task id and cleaned up the first with an unverified cancel).
+CRITICAL_SELF_ASSIGN_TIMEOUT_S = 5.0
+CRITICAL_SELF_ASSIGN_POLL_INTERVAL_S = 0.5
+# Labels the preemption pipeline stamps on requests it creates. They must be
+# stripped before a request is re-dispatched and mark tasks that must never be
+# picked as preemption victims.
+_PREEMPTION_LABEL_PREFIXES = (
+    "forced_from=",
+    "preempted_by=",
+    "requeued_from=",
+    "killed_for_critical=",
+)
+
+# Serializes victim selection and preemption so two concurrently dispatched
+# critical tasks cannot kill two tasks (or the same task twice) for one robot.
+_preemption_lock = asyncio.Lock()
+
+
+def _task_state_status(task_state: Optional[mdl.TaskState]) -> Optional[str]:
+    if task_state is None:
+        return None
+    return _status_text(getattr(task_state, "status", None))
+
+
 async def _handle_critical_preemption(
     task_id: str,
     task_repo: TaskRepository,
     fleet_repo: FleetRepository,
-    interrupt_immediately: bool = False,
-    timeout: float = 10.0,
+    watch_window: float = PREEMPTION_WATCH_WINDOW_S,
 ):
-    """Watch for which robot wins the bid, interrupt that robot's active task,
-    then resume it after the critical task completes.
+    """Ensure the critical task `task_id` starts as soon as possible.
+
+    Watches for up to `watch_window` seconds: if the critical task starts (or
+    reaches a terminal state) on its own there is nothing to do; if a
+    lower-priority task is (or becomes) active while the critical is still
+    pending, that task is killed, the critical is force-assigned to the freed
+    robot, and the killed task is re-dispatched from the start.
     This is best-effort: failures are logged but do not raise.
     """
     try:
-        assigned_robot: Optional[str] = None
-        terminal_statuses = {"completed", "failed", "canceled", "killed"}
-        preferred_active_statuses = {"underway", "blocked", "delayed", "standby"}
-        paused_task: Optional[mdl.TaskState] = None
-        critical_task_id = task_id
-        # When we immediately preempt, the paused task is *killed* (not merely
-        # paused). A killed task must never be resumed afterwards, otherwise the
-        # robot drives back to finish work it was meant to abandon (e.g. resuming
-        # a patrol after an end-of-shift return-to-charger preemption).
-        paused_task_killed = False
+        incoming_request = await task_repo.get_task_request(task_id)
+        # The watcher is only spawned for critical requests, so never let a
+        # missing stored request weaken the incoming priority below critical.
+        incoming_priority = max(
+            priority_value(incoming_request), CRITICAL_PRIORITY_VALUE
+        )
+        incoming_category = getattr(incoming_request, "category", None)
 
-        if interrupt_immediately:
-            candidates = await task_repo.query_task_states()
-            paused_task = _select_paused_task(
-                candidates,
-                task_id,
-                terminal_statuses,
-                preferred_active_statuses,
-                assigned_robot=None,
+        deadline = time.monotonic() + watch_window
+        while True:
+            critical_status = _task_state_status(
+                await task_repo.get_task_state(task_id)
             )
-            if paused_task and paused_task.assigned_to:
-                assigned_robot = paused_task.assigned_to.name
-        else:
-            evt = asyncio.Event()
-
-            def on_state(s: mdl.TaskState):
-                try:
-                    nonlocal assigned_robot
-                    if s.booking.id != task_id:
-                        return
-                    robot = _extract_assigned_robot_name(s)
-                    if not robot:
-                        return
-                    # Prefer states where dispatch has selected/dispatched, but allow
-                    # fallback to assigned_to for scheduled tasks where dispatch is null.
-                    if s.dispatch:
-                        status = getattr(s.dispatch, "status", None)
-                        status_value = getattr(status, "value", None)
-                        if status_value not in ("selected", "dispatched"):
-                            return
-                    assigned_robot = robot
-                    evt.set()
-                except Exception:
-                    logger.exception("error in critical watcher on_state")
-
-            # subscribe to task states for this tas timeout=timeoutk
-            sub = task_events.task_states.pipe(
-                rxops.filter(lambda x: x.booking.id == task_id)
-            ).subscribe(on_state)
-
-            # The dispatch response may already be persisted before this watcher
-            # starts, so seed the watcher with the current stored state to avoid
-            # missing the initial assignment event.
-            try:
-                current_state = await task_repo.get_task_state(task_id)
-                if current_state is not None:
-                    on_state(current_state)
-            except Exception:
-                logger.exception(
-                    "critical watcher: failed to read current state for %s", task_id
-                )
-
-            try:
-                await asyncio.wait_for(evt.wait(), timeout=30)
-            except asyncio.TimeoutError:
+            if critical_status in ACTIVE_TASK_STATUSES:
                 logger.info(
-                    "critical watcher: timed out waiting for assignment for %s",
+                    "critical watcher: %s already active (%s); no preemption needed",
                     task_id,
+                    critical_status,
                 )
-                sub.dispose()
                 return
-            sub.dispose()
-
-        if not paused_task:
-            if not assigned_robot:
-                logger.info("critical watcher: no assigned robot found for %s", task_id)
+            if critical_status in TERMINAL_TASK_STATUSES:
+                logger.info(
+                    "critical watcher: %s reached terminal state (%s); standing down",
+                    task_id,
+                    critical_status,
+                )
                 return
 
-            logger.info(
-                "critical watcher: assigned robot %s for %s", assigned_robot, task_id
-            )
-
-            # find active non-critical task on that robot
-            candidates = await task_repo.query_task_states()
-            paused_task = _select_paused_task(
-                candidates,
-                task_id,
-                terminal_statuses,
-                preferred_active_statuses,
-                assigned_robot=assigned_robot,
-            )
-
-        if not paused_task:
-            logger.info(
-                "critical watcher: no paused task found for critical %s", task_id
-            )
-            return
-
-        paused_id = paused_task.booking.id
-        robot_name = (
-            paused_task.assigned_to.name if paused_task.assigned_to else assigned_robot
-        )
-        fleet_name = paused_task.assigned_to.group if paused_task.assigned_to else None
-        logger.info(
-            "critical watcher: pausing task %s for critical %s", paused_id, task_id
-        )
-
-        interrupt_started_at = time.monotonic()
-        logger.info(
-            "INTERRUPT BEGIN ts=%s robot_name=%s active_task_id=%s",
-            _utc_now_iso(),
-            robot_name,
-            paused_id,
-        )
-
-        poll_stop_event = asyncio.Event()
-        _spawn_background_task(
-            _debug_poll_fleet_state(
-                fleet_repo,
-                task_repo,
-                fleet_name,
-                robot_name,
-                paused_id,
-                poll_stop_event,
-            )
-        )
-
-        # send interrupt request
-        try:
-            interrupt_ready_event = asyncio.Event()
-            _spawn_background_task(
-                _interrupt_watchdog(robot_name, paused_id, interrupt_ready_event)
-            )
-            try:
-                if not fleet_name or not robot_name:
-                    logger.warning(
-                        "critical watcher: missing fleet or robot name for %s; aborting preemptive dispatch",
-                        paused_id,
-                    )
-                    return
-
-                before_interrupt_fleet_state = await fleet_repo.get_fleet_state(
-                    fleet_name
+            # Only victim selection and the kill itself need to be atomic
+            # with respect to other concurrent critical watchers (so two
+            # criticals cannot select the same active task, or both try to
+            # kill work meant for one robot). Everything after a successful
+            # kill is specific to this critical/victim pair and runs outside
+            # the lock, so a slow RMF call there cannot block unrelated
+            # preemptions — this is what previously let one hung call
+            # silently freeze critical preemption fleet-wide for up to 120s.
+            kill_result: Optional[Tuple[str, str, str, float]] = None
+            async with _preemption_lock:
+                # Re-read inside the lock: another watcher may have preempted
+                # while we waited, changing which tasks are active.
+                critical_status = _task_state_status(
+                    await task_repo.get_task_state(task_id)
                 )
-                logger.info(
-                    "ROBOT SNAPSHOT stage=before_interrupt ts=%s robot=%s status=%s task_id=%s %s",
-                    _utc_now_iso(),
-                    robot_name,
-                    None
-                    if before_interrupt_fleet_state is None
-                    or before_interrupt_fleet_state.robots is None
-                    or before_interrupt_fleet_state.robots.get(robot_name) is None
-                    else _status_text(
-                        before_interrupt_fleet_state.robots[robot_name].status
-                    ),
-                    None
-                    if before_interrupt_fleet_state is None
-                    or before_interrupt_fleet_state.robots is None
-                    or before_interrupt_fleet_state.robots.get(robot_name) is None
-                    else before_interrupt_fleet_state.robots[robot_name].task_id,
-                    _robot_state_debug(before_interrupt_fleet_state, robot_name),
-                )
-
-                intr_req = mdl.TaskInterruptionRequest(
-                    type="interrupt_task_request",
-                    task_id=paused_id,
-                    labels=[f"preempted_by={task_id}"],
-                )
-                interrupt_request_json = intr_req.model_dump_json(exclude_none=True)
-                interrupt_response_json = await tasks_service().call(
-                    interrupt_request_json
-                )
-                interrupt_request_id = None
-                try:
-                    parsed_interrupt_response = json.loads(interrupt_response_json)
-                    if isinstance(parsed_interrupt_response, dict):
-                        interrupt_request_id = parsed_interrupt_response.get(
-                            "request_id"
-                        )
-                except Exception:
-                    parsed_interrupt_response = None
-                logger.info(
-                    "INTERRUPT RAW RESPONSE ts=%s request_id=%s body=%s",
-                    _utc_now_iso(),
-                    interrupt_request_id,
-                    interrupt_response_json,
-                )
-                if not _is_interrupt_success(interrupt_response_json):
-                    logger.error(
-                        "critical watcher: interrupt failed for %s; aborting critical dispatch",
-                        paused_id,
-                    )
-                    return
-                intr_resp = mdl.TaskInterruptionResponse.model_validate_json(
-                    interrupt_response_json
-                )
-                logger.info(
-                    "INTERRUPT VERIFIED ts=%s task_id=%s robot_name=%s request_id=%s parsed_response=%s",
-                    _utc_now_iso(),
-                    paused_id,
-                    robot_name,
-                    interrupt_request_id,
-                    parsed_interrupt_response,
-                )
-                # on success, save token
-                root = intr_resp.root
-                token = None
-                try:
-                    token = root.root.token
-                except Exception:
-                    token = None
-                if token:
-                    await task_repo.save_interruption_token(paused_id, token)
+                if (
+                    critical_status in ACTIVE_TASK_STATUSES
+                    or critical_status in TERMINAL_TASK_STATUSES
+                ):
                     logger.info(
-                        "critical watcher: interrupted %s with token %s",
-                        paused_id,
-                        token,
+                        "critical watcher: %s settled (%s) while waiting for the "
+                        "preemption lock; standing down",
+                        task_id,
+                        critical_status,
+                    )
+                    return
+                candidates = await task_repo.query_task_states()
+                victim = await _select_preemption_victim(
+                    candidates,
+                    task_id,
+                    incoming_priority,
+                    incoming_category,
+                    task_repo,
+                )
+                if victim is not None:
+                    kill_result = await _kill_victim_for_critical(
+                        victim, task_id, task_repo, fleet_repo
                     )
 
-                # For immediate preemption, hard stop the paused task so RMF frees the robot.
-                if interrupt_immediately:
-                    try:
-                        kill_req = mdl.TaskKillRequest(
-                            type="kill_task_request",
-                            task_id=paused_id,
-                            labels=[f"killed_for_critical={task_id}"],
-                        )
-                        await tasks_service().call(
-                            kill_req.model_dump_json(exclude_none=True),
-                            timeout=5,
-                        )
-                        paused_task_killed = True
-                        logger.info(
-                            "critical watcher: killed %s for critical %s",
-                            paused_id,
-                            task_id,
-                        )
-                        ready, status = await _wait_for_robot_stop(
-                            fleet_repo,
+            if kill_result is not None:
+                victim_id, fleet_name, robot_name, interrupt_started_at = kill_result
+                try:
+                    await asyncio.wait_for(
+                        _finish_preemption_after_kill(
+                            victim_id,
                             fleet_name,
                             robot_name,
-                            paused_id,
-                            timeout=5.0,
-                        )
-
-                        logger.info(
-                            "critical watcher: robot ready=%s status=%s after kill",
-                            ready,
-                            status,
-                        )
-
-                    except Exception:
-                        logger.warning(
-                            "critical watcher: failed to kill %s for critical %s",
-                            paused_id,
                             task_id,
-                        )
-
-                    after_interrupt_fleet_state = await fleet_repo.get_fleet_state(
-                        fleet_name
-                    )
-                    logger.info(
-                        "ROBOT SNAPSHOT stage=after_interrupt ts=%s robot=%s status=%s task_id=%s %s",
-                        _utc_now_iso(),
-                        robot_name,
-                        None
-                        if after_interrupt_fleet_state is None
-                        or after_interrupt_fleet_state.robots is None
-                        or after_interrupt_fleet_state.robots.get(robot_name) is None
-                        else _status_text(
-                            after_interrupt_fleet_state.robots[robot_name].status
+                            interrupt_started_at,
+                            task_repo,
+                            fleet_repo,
                         ),
-                        None
-                        if after_interrupt_fleet_state is None
-                        or after_interrupt_fleet_state.robots is None
-                        or after_interrupt_fleet_state.robots.get(robot_name) is None
-                        else after_interrupt_fleet_state.robots[robot_name].task_id,
-                        _robot_state_debug(after_interrupt_fleet_state, robot_name),
+                        timeout=PREEMPTION_FINISH_TIMEOUT_S,
                     )
-
-                    logger.info(
-                        "PREEMPT PIPELINE TIMING robot=%s interrupt_to_dispatch_ms=%s",
-                        robot_name,
-                        int((time.monotonic() - interrupt_started_at) * 1000),
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "critical watcher: finishing preemption of %s for %s "
+                        "timed out after %ss",
+                        victim_id,
+                        task_id,
+                        PREEMPTION_FINISH_TIMEOUT_S,
                     )
+                return
 
-                # If we are preempting immediately, force-assign the critical task to
-                # the same robot so it starts right away, then cancel the queued original.
-                if interrupt_immediately and paused_task.assigned_to:
-                    try:
-                        critical_dispatch_started_at = time.monotonic()
-                        logger.info(
-                            "CRITICAL DISPATCH BEGIN ts=%s robot_name=%s critical_task_id=%s paused_task_id=%s gap_since_interrupt_ms=%s",
-                            _utc_now_iso(),
-                            robot_name,
-                            task_id,
-                            paused_id,
-                            int(
-                                (critical_dispatch_started_at - interrupt_started_at)
-                                * 1000
-                            ),
-                        )
-                        critical_request = await task_repo.get_task_request(task_id)
-                        if critical_request:
-                            _apply_priority_labels(critical_request)
-                            forced_labels = list(critical_request.labels or [])
-                            forced_labels.append(f"forced_from={task_id}")
-                            critical_request.labels = forced_labels
-                            latest_fleet_state = await fleet_repo.get_fleet_state(
-                                fleet_name
-                            )
-                            if latest_fleet_state and latest_fleet_state.robots:
-                                latest_robot = latest_fleet_state.robots.get(robot_name)
-                                if latest_robot and latest_robot.name:
-                                    robot_name = latest_robot.name
-                            robot_req = mdl.RobotTaskRequest(
-                                type="robot_task_request",
-                                robot=robot_name,
-                                fleet=fleet_name,
-                                request=critical_request,
-                            )
-                            forced_resp: Optional[mdl.RobotTaskResponse] = None
-                            for _ in range(2):
-                                forced_resp = mdl.RobotTaskResponse.model_validate_json(
-                                    await tasks_service().call(
-                                        robot_req.model_dump_json(exclude_none=True)
-                                    )
-                                )
-                                if forced_resp.root.root.success:
-                                    break
-                                await asyncio.sleep(0.3)
-
-                            if forced_resp and forced_resp.root.root.success:
-                                forced_state = cast(
-                                    mdl.TaskDispatchResponse1, forced_resp.root.root
-                                ).state
-                                critical_task_id = forced_state.booking.id
-                                await task_repo.save_task_request(
-                                    critical_task_id, critical_request
-                                )
-                                await task_repo.save_task_state(forced_state)
-                                logger.info(
-                                    "CRITICAL DISPATCH COMPLETED ts=%s critical_task_id=%s robot_name=%s",
-                                    _utc_now_iso(),
-                                    critical_task_id,
-                                    robot_name,
-                                )
-                                logger.info(
-                                    "CRITICAL PREEMPTION SUMMARY task_id=%s robot_name=%s interrupt_to_dispatch_ms=%s",
-                                    task_id,
-                                    robot_name,
-                                    int(
-                                        (time.monotonic() - interrupt_started_at) * 1000
-                                    ),
-                                )
-                                poll_stop_event.set()
-                                logger.info(
-                                    "critical watcher: forced critical task %s on %s",
-                                    critical_task_id,
-                                    robot_name,
-                                )
-                                try:
-                                    cancel_req = mdl.CancelTaskRequest(
-                                        type="cancel_task_request",
-                                        task_id=task_id,
-                                        labels=[f"replaced_by={critical_task_id}"],
-                                    )
-                                    await tasks_service().call(
-                                        cancel_req.model_dump_json(exclude_none=True),
-                                        timeout=5,
-                                    )
-                                    logger.info(
-                                        "critical watcher: canceled queued critical %s",
-                                        task_id,
-                                    )
-                                except Exception:
-                                    logger.warning(
-                                        "critical watcher: cancel cleanup failed for queued critical %s",
-                                        task_id,
-                                    )
-                            else:
-                                logger.warning(
-                                    "critical watcher: forced dispatch rejected for critical %s",
-                                    task_id,
-                                )
-                    except Exception:
-                        logger.exception(
-                            "critical watcher: failed to force-assign critical %s",
-                            task_id,
-                        )
-            finally:
-                interrupt_ready_event.set()
-
-        except Exception:
-            logger.exception(
-                "critical watcher: failed during interrupt preemption for %s",
-                paused_id,
-            )
-
-        # wait for critical task to complete
-        comp_evt = asyncio.Event()
-
-        def on_done(s: mdl.TaskState):
-            try:
-                if s.booking.id != critical_task_id:
-                    return
-                st = getattr(s, "status", None)
-                if st and getattr(st, "value", None) in terminal_statuses:
-                    comp_evt.set()
-            except Exception:
-                logger.exception("error in critical watcher on_done")
-
-        sub2 = task_events.task_states.pipe(
-            rxops.filter(lambda x: x.booking.id == critical_task_id)
-        ).subscribe(on_done)
-
-        try:
-            current_state = await task_repo.get_task_state(critical_task_id)
-            if current_state is not None:
-                on_done(current_state)
-        except Exception:
-            logger.exception(
-                "critical watcher: failed to read current completion state for %s",
-                critical_task_id,
-            )
-
-        try:
-            await asyncio.wait_for(comp_evt.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.info(
-                "critical watcher: timed out waiting for critical task %s to complete",
-                critical_task_id,
-            )
-        finally:
-            sub2.dispose()
-
-        # attempt resume if we saved a token — but never resume a task we killed.
-        # Immediate preemption (e.g. end-of-shift return-to-charger) kills the
-        # paused task; resuming it would send the robot back to abandon work.
-        if paused_task_killed:
-            logger.info(
-                "critical watcher: not resuming %s — it was killed for critical %s",
-                paused_id,
-                task_id,
-            )
-            # Clean up any stale interruption token so it cannot be reused later.
-            try:
-                await task_repo.delete_interruption_token(paused_id)
-            except Exception:
-                logger.exception(
-                    "critical watcher: failed to clear token for killed %s", paused_id
+            if time.monotonic() >= deadline:
+                logger.info(
+                    "critical watcher: no preemptable task appeared for %s within "
+                    "%ss; leaving it to queue order",
+                    task_id,
+                    watch_window,
                 )
-        else:
-            try:
-                token = await task_repo.get_interruption_token(paused_id)
-                if token:
-                    resume_req = mdl.TaskResumeRequest(
-                        type="resume_task_request",
-                        task_id=paused_id,
-                        token=token,
-                        labels=[f"resumed_after={task_id}"],
-                    )
-                    await tasks_service().call(
-                        resume_req.model_dump_json(exclude_none=True)
-                    )
-                    await task_repo.delete_interruption_token(paused_id)
-                    logger.info(
-                        "critical watcher: resumed %s after %s", paused_id, task_id
-                    )
-            except Exception:
-                logger.exception(
-                    "critical watcher: failed to resume %s after %s", paused_id, task_id
-                )
-
+                return
+            await asyncio.sleep(PREEMPTION_POLL_INTERVAL_S)
     except Exception:
         logger.exception("critical watcher failed for %s", task_id)
 
 
-def _select_paused_task(
+async def _select_preemption_victim(
     candidates: List[mdl.TaskState],
     critical_task_id: str,
-    terminal_statuses: set[str],
-    preferred_active_statuses: set[str],
-    assigned_robot: Optional[str],
+    incoming_priority: int,
+    incoming_category: Optional[str],
+    task_repo: TaskRepository,
 ) -> Optional[mdl.TaskState]:
-    def _status_value(task_state: mdl.TaskState) -> Optional[str]:
-        status = getattr(task_state, "status", None)
-        return getattr(status, "value", None)
+    """Pick an active task the incoming critical is allowed to interrupt.
 
-    # Only interrupt active work. Avoid queued or stale tasks.
-    active_candidates: list[mdl.TaskState] = []
-    for c in candidates:
-        if c.booking.id == critical_task_id:
+    Only interrupt active work, never queued or stale tasks; only work of
+    strictly lower priority (a critical must not kill another critical);
+    and only within the same task category, since fleets are function-
+    specific (clean/patrol/deliver) — a critical clean must never kill a
+    patrol on a fleet that could never have served the clean anyway.
+    """
+    for candidate in candidates:
+        if candidate.booking.id == critical_task_id:
             continue
-        robot = _extract_assigned_robot_name(c)
-        if not robot:
+        if not _extract_assigned_robot_name(candidate):
             continue
-        if assigned_robot and robot != assigned_robot:
+        if _task_state_status(candidate) not in ACTIVE_TASK_STATUSES:
             continue
-        status_value = _status_value(c)
-        if not status_value or status_value in terminal_statuses:
+        victim_request = await task_repo.get_task_request(candidate.booking.id)
+        if getattr(victim_request, "category", None) != incoming_category:
             continue
-        if status_value in preferred_active_statuses:
-            active_candidates.append(c)
+        victim_labels = list(getattr(victim_request, "labels", None) or [])
+        if any(
+            label.startswith(("forced_from=", "preempted_by="))
+            for label in victim_labels
+        ):
             continue
-
-    if active_candidates:
-        return active_candidates[0]
+        if not can_preempt(
+            incoming_priority, priority_value(victim_request, victim_labels)
+        ):
+            continue
+        return candidate
     return None
+
+
+async def _kill_victim_for_critical(
+    victim: mdl.TaskState,
+    critical_task_id: str,
+    task_repo: TaskRepository,
+    fleet_repo: FleetRepository,
+) -> Optional[Tuple[str, str, str, float]]:
+    """Hard-stop the victim so RMF frees its robot.
+
+    Must be called while holding `_preemption_lock`. Returns
+    (victim_id, fleet_name, robot_name, interrupt_started_at) on success, or
+    None if the victim could not be killed (missing fleet/robot info, or the
+    kill call itself failed or timed out) — the caller retries with a fresh
+    victim selection on the next poll, bounded by the overall watch window.
+    """
+    victim_id = victim.booking.id
+    robot_name = _extract_assigned_robot_name(victim)
+    fleet_name = victim.assigned_to.group if victim.assigned_to else None
+    if not fleet_name or not robot_name:
+        logger.warning(
+            "critical watcher: missing fleet or robot name for victim %s; "
+            "aborting preemption for %s",
+            victim_id,
+            critical_task_id,
+        )
+        return None
+
+    interrupt_started_at = time.monotonic()
+    logger.info(
+        "INTERRUPT BEGIN ts=%s robot_name=%s active_task_id=%s",
+        _utc_now_iso(),
+        robot_name,
+        victim_id,
+    )
+
+    try:
+        kill_req = mdl.TaskKillRequest(
+            type="kill_task_request",
+            task_id=victim_id,
+            labels=[f"killed_for_critical={critical_task_id}"],
+        )
+        kill_response_json = await tasks_service().call(
+            kill_req.model_dump_json(exclude_none=True),
+            timeout=PREEMPTION_RMF_CALL_TIMEOUT_S,
+        )
+    except Exception:
+        logger.exception(
+            "critical watcher: kill call failed for %s (critical %s)",
+            victim_id,
+            critical_task_id,
+        )
+        return None
+    if not _is_service_success(kill_response_json):
+        logger.error(
+            "critical watcher: kill failed for %s; will retry within the "
+            "watch window for critical %s: %s",
+            victim_id,
+            critical_task_id,
+            kill_response_json,
+        )
+        return None
+    logger.info(
+        "critical watcher: killed %s for critical %s",
+        victim_id,
+        critical_task_id,
+    )
+    return victim_id, fleet_name, robot_name, interrupt_started_at
+
+
+async def _finish_preemption_after_kill(
+    victim_id: str,
+    fleet_name: str,
+    robot_name: str,
+    critical_task_id: str,
+    interrupt_started_at: float,
+    task_repo: TaskRepository,
+    fleet_repo: FleetRepository,
+) -> None:
+    """Let the critical's own booking take the freed robot, falling back to
+    a clean cancel + re-dispatch only if it doesn't; then re-dispatch the
+    killed victim from the start so its work is not lost.
+
+    Runs outside `_preemption_lock` (the victim is already dead and cannot
+    be re-selected by another watcher) and is wrapped by the caller in a
+    hard timeout, so a slow RMF call here cannot block other preemptions.
+    """
+    poll_stop_event = asyncio.Event()
+    _spawn_background_task(
+        _debug_poll_fleet_state(
+            fleet_repo,
+            task_repo,
+            fleet_name,
+            robot_name,
+            victim_id,
+            poll_stop_event,
+        )
+    )
+
+    try:
+        ready, status = await _wait_for_robot_stop(
+            fleet_repo,
+            fleet_name,
+            robot_name,
+            victim_id,
+            timeout=5.0,
+        )
+        logger.info(
+            "critical watcher: robot ready=%s status=%s after kill",
+            ready,
+            status,
+        )
+
+        self_assigned = await _wait_for_critical_self_assignment(
+            critical_task_id, task_repo
+        )
+        if self_assigned:
+            logger.info(
+                "CRITICAL SELF-ASSIGNED ts=%s critical_task_id=%s "
+                "interrupt_to_active_ms=%s",
+                _utc_now_iso(),
+                critical_task_id,
+                int((time.monotonic() - interrupt_started_at) * 1000),
+            )
+        else:
+            logger.info(
+                "critical watcher: %s did not self-assign within %ss; "
+                "falling back to cancel + re-dispatch",
+                critical_task_id,
+                CRITICAL_SELF_ASSIGN_TIMEOUT_S,
+            )
+            await _redispatch_stalled_critical(
+                critical_task_id,
+                fleet_name,
+                task_repo,
+                fleet_repo,
+                interrupt_started_at,
+            )
+        # The victim was killed regardless of whether the critical actually
+        # ended up running (on failure it stays queued at high priority), so
+        # always bring the victim's work back.
+        await _requeue_preempted_task(
+            victim_id, critical_task_id, task_repo, fleet_repo
+        )
+    except Exception:
+        logger.exception(
+            "critical watcher: failed during preemption of %s for %s",
+            victim_id,
+            critical_task_id,
+        )
+    finally:
+        poll_stop_event.set()
+
+
+async def _wait_for_critical_self_assignment(
+    critical_task_id: str,
+    task_repo: TaskRepository,
+    timeout: float = CRITICAL_SELF_ASSIGN_TIMEOUT_S,
+    poll_interval: float = CRITICAL_SELF_ASSIGN_POLL_INTERVAL_S,
+) -> bool:
+    """Poll the critical's own (already-queued) booking to see if RMF's
+    dispatcher auctions it onto the now-freed robot without any
+    intervention from us. Returns True as soon as it goes active (or
+    terminal, which would be unusual this early but is still "handled").
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = _task_state_status(await task_repo.get_task_state(critical_task_id))
+        if status in ACTIVE_TASK_STATUSES or status in TERMINAL_TASK_STATUSES:
+            return True
+        await asyncio.sleep(poll_interval)
+    return False
+
+
+async def _redispatch_stalled_critical(
+    critical_task_id: str,
+    fleet_name: str,
+    task_repo: TaskRepository,
+    fleet_repo: FleetRepository,
+    interrupt_started_at: float,
+) -> Optional[str]:
+    """Fallback for when the critical's own booking does not get auctioned
+    onto the freed robot on its own (RMF's dispatcher does not appear to
+    retry a bid that had no capable robot at submission time).
+
+    Cancels the stalled booking — verifying success, unlike the previous
+    "direct assign + fire-and-forget cancel" approach — and only then
+    re-submits the same request through the normal auction. If the cancel
+    can't be confirmed, this aborts rather than risk a second live RMF task
+    for the same critical: the original stays queued, visibly, instead of
+    silently duplicating.
+    """
+    try:
+        cancel_req = mdl.CancelTaskRequest(
+            type="cancel_task_request",
+            task_id=critical_task_id,
+            labels=["critical_self_assign_timeout"],
+        )
+        cancel_response_json = await tasks_service().call(
+            cancel_req.model_dump_json(exclude_none=True),
+            timeout=PREEMPTION_RMF_CALL_TIMEOUT_S,
+        )
+    except Exception:
+        logger.exception(
+            "critical watcher: cancel call failed for stalled critical %s; "
+            "leaving it queued rather than risk a duplicate task",
+            critical_task_id,
+        )
+        return None
+    if not _is_service_success(cancel_response_json):
+        logger.error(
+            "critical watcher: could not confirm cancellation of stalled "
+            "critical %s; leaving it queued rather than risk a duplicate "
+            "task: %s",
+            critical_task_id,
+            cancel_response_json,
+        )
+        return None
+    logger.info(
+        "critical watcher: confirmed cancel of stalled critical %s; "
+        "re-dispatching through the normal auction",
+        critical_task_id,
+    )
+
+    try:
+        critical_request = await task_repo.get_task_request(critical_task_id)
+        if not critical_request:
+            logger.warning(
+                "critical watcher: no stored request for %s; cannot re-dispatch",
+                critical_task_id,
+            )
+            return None
+        _apply_priority_labels(critical_request)
+        labels = [
+            label
+            for label in (critical_request.labels or [])
+            if not label.startswith(_PREEMPTION_LABEL_PREFIXES)
+        ]
+        # Reuses the same label the bridge's remap logic already looks for
+        # (see rmf_demos_bridges status_service._find_successor_task_id) so
+        # a digiBASE-submitted critical's work order follows this redispatch
+        # without any bridge-side change.
+        labels.append(f"forced_from={critical_task_id}")
+        critical_request.labels = labels
+        critical_request.fleet_name = fleet_name
+        critical_request.unix_millis_request_time = int(time.time() * 1000)
+        critical_request.unix_millis_earliest_start_time = None
+
+        dispatch_request = mdl.DispatchTaskRequest(
+            type="dispatch_task_request",
+            request=critical_request,
+        )
+        # Re-enters post_dispatch_task, which will see this is still a
+        # critical request and spawn a fresh watcher for it. That watcher
+        # will find the robot already idle (nothing else to preempt) and
+        # stand down as soon as this booking goes active — harmless.
+        resp = await post_dispatch_task(dispatch_request, task_repo, fleet_repo)
+        if isinstance(resp, RawJSONResponse):
+            logger.error(
+                "critical watcher: re-dispatch failed for stalled critical %s",
+                critical_task_id,
+            )
+            return None
+        redispatched_state = cast(mdl.TaskDispatchResponse1, resp.root).state
+        redispatched_task_id = redispatched_state.booking.id
+        logger.info(
+            "CRITICAL RE-DISPATCH COMPLETED ts=%s original_task_id=%s "
+            "new_task_id=%s interrupt_to_dispatch_ms=%s",
+            _utc_now_iso(),
+            critical_task_id,
+            redispatched_task_id,
+            int((time.monotonic() - interrupt_started_at) * 1000),
+        )
+        return redispatched_task_id
+    except Exception:
+        logger.exception(
+            "critical watcher: failed to re-dispatch stalled critical %s",
+            critical_task_id,
+        )
+        return None
+
+
+async def _requeue_preempted_task(
+    victim_id: str,
+    critical_task_id: str,
+    task_repo: TaskRepository,
+    fleet_repo: FleetRepository,
+) -> None:
+    """Re-dispatch a killed victim from the start so its work is not lost."""
+    try:
+        victim_request = await task_repo.get_task_request(victim_id)
+        if victim_request is None:
+            logger.warning(
+                "critical watcher: no stored request for killed %s; cannot requeue",
+                victim_id,
+            )
+            return
+        labels = [
+            label
+            for label in (victim_request.labels or [])
+            if not label.startswith(_PREEMPTION_LABEL_PREFIXES)
+        ]
+        if any(label.startswith("scheduled_schedule_id=") for label in labels):
+            # A schedule run: its next occurrence (or chaining) re-dispatches
+            # it; requeueing here would double-book the schedule.
+            logger.info(
+                "critical watcher: not requeueing schedule run %s killed for %s",
+                victim_id,
+                critical_task_id,
+            )
+            return
+        labels.append(f"requeued_from={victim_id}")
+        victim_request.labels = labels
+        victim_request.unix_millis_request_time = int(time.time() * 1000)
+        victim_request.unix_millis_earliest_start_time = None
+        dispatch_request = mdl.DispatchTaskRequest(
+            type="dispatch_task_request",
+            request=victim_request,
+        )
+        resp = await post_dispatch_task(dispatch_request, task_repo, fleet_repo)
+        if isinstance(resp, RawJSONResponse):
+            logger.error(
+                "critical watcher: requeue dispatch failed for %s (killed for %s)",
+                victim_id,
+                critical_task_id,
+            )
+            return
+        requeued_state = cast(mdl.TaskDispatchResponse1, resp.root).state
+        logger.info(
+            "critical watcher: requeued %s as %s after critical %s",
+            victim_id,
+            requeued_state.booking.id,
+            critical_task_id,
+        )
+        # Fire-and-forget diagnostic: confirm RMF actually assigns a robot to
+        # the requeued task. Deliberately does not re-dispatch on failure —
+        # the requeue may correctly be waiting for its own fleet's only robot
+        # to free up, and resubmitting here would risk a duplicate physical
+        # task. It only makes a stuck requeue visible in the logs.
+        _spawn_background_task(
+            _verify_requeued_task_assignment(
+                requeued_state.booking.id, victim_id, critical_task_id, task_repo
+            )
+        )
+    except Exception:
+        logger.exception(
+            "critical watcher: failed to requeue %s after critical %s",
+            victim_id,
+            critical_task_id,
+        )
+
+
+async def _verify_requeued_task_assignment(
+    requeued_task_id: str,
+    victim_id: str,
+    critical_task_id: str,
+    task_repo: TaskRepository,
+    timeout: float = REQUEUE_VERIFICATION_TIMEOUT_S,
+    poll_interval: float = 1.0,
+) -> None:
+    """Best-effort diagnostic: log whether the requeued victim ever gets a
+    robot. Never re-dispatches — see the call site for why."""
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = await task_repo.get_task_state(requeued_task_id)
+            status = _task_state_status(state)
+            if status in ACTIVE_TASK_STATUSES or status in TERMINAL_TASK_STATUSES:
+                logger.info(
+                    "critical watcher: requeued %s (victim %s, critical %s) "
+                    "reached status=%s",
+                    requeued_task_id,
+                    victim_id,
+                    critical_task_id,
+                    status,
+                )
+                return
+            dispatch = getattr(state, "dispatch", None) if state else None
+            dispatch_status = getattr(getattr(dispatch, "status", None), "value", None)
+            if dispatch_status == "failed":
+                logger.error(
+                    "critical watcher: requeued %s (victim %s, critical %s) "
+                    "was rejected by RMF's dispatcher; it may need manual "
+                    "re-submission",
+                    requeued_task_id,
+                    victim_id,
+                    critical_task_id,
+                )
+                return
+            await asyncio.sleep(poll_interval)
+        logger.warning(
+            "critical watcher: requeued %s (victim %s, critical %s) is still "
+            "unassigned after %ss; it may correctly be waiting for its "
+            "fleet's own robot to free up — check GET /tasks/%s/state "
+            "(dispatch.status/assignment) if this persists",
+            requeued_task_id,
+            victim_id,
+            critical_task_id,
+            timeout,
+            requeued_task_id,
+        )
+    except Exception:
+        logger.exception(
+            "critical watcher: failed to verify requeue %s (victim %s, " "critical %s)",
+            requeued_task_id,
+            victim_id,
+            critical_task_id,
+        )
 
 
 @router.post(
